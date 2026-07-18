@@ -17,6 +17,6 @@ Apply the rubric from `docs/AGENT_HARNESS.md` to the full diff on this branch re
 Produce two outputs:
 
 1. Post a PR comment stating the risk level and exactly which rubric items fired (or didn't, for a LOW RISK call) — be specific enough that a human reviewer can verify your reasoning without re-deriving it themselves.
-2. Append one line to `.github/pr-risk-log.jsonl`: `{"pr": <number>, "sha": <head sha>, "risk": "low"|"high", "reasons": [...], "checks_passed": true|false, "timestamp": "<ISO 8601>"}`. Commit this file — it's the evidence base for eventually trusting real auto-merge.
+2. Append one line to `.github/pr-risk-log.jsonl`: `{"pr": <number>, "sha": <head sha>, "risk": "low"|"high", "reasons": [...], "checks_passed": true|false, "timestamp": "<ISO 8601>"}`. Commit this file — it's the evidence base for eventually trusting real auto-merge. Then `git push`. This runs on an ephemeral runner — a commit that never reaches the remote is indistinguishable from work that never happened once the job ends.
 
 Hand off to the Deployer next — you do not open, update, or merge the PR yourself.

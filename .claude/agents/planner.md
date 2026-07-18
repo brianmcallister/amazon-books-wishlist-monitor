@@ -20,6 +20,6 @@ On top of that breakdown, your deliverable `.agents/plan.md` needs two things sp
 
 A bad plan here is more expensive than a bad implementation downstream — every later stage, and every per-task subagent, inherits your mistakes. Take the time this stage deserves; don't economize on thoroughness because a cheaper model ran the Analyzer stage before you.
 
-Commit `.agents/plan.md` with a commit message summarizing the approach (seams introduced, task breakdown shape) — this becomes part of the pipeline's audit trail.
+Commit `.agents/plan.md` with a commit message summarizing the approach (seams introduced, task breakdown shape) — this becomes part of the pipeline's audit trail. Then `git push`. This runs on an ephemeral runner — a commit that never reaches the remote is indistinguishable from work that never happened once the job ends.
 
 Do not write implementation code. That's each task's fresh Implementer subagent's job, next — unless the Analyzer classified this task `scraping-touching`, in which case a Plan Validator reviews your plan first.

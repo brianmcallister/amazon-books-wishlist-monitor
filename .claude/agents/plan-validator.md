@@ -21,6 +21,6 @@ Check specifically:
 3. **Does the plan stay inside the issue's stated non-goals**, or does it quietly expand scope?
 4. **Is anything in the load-bearing list touched without an explicit, deliberate justification in the plan?** Silence on this point is a finding, not a pass.
 
-Commit `.agents/plan-validation.md` with your verdict: approved, or specific gaps that need to go back to the Planner before implementation starts. Be concrete — "seems fine" is not a validation.
+Commit `.agents/plan-validation.md` with your verdict: approved, or specific gaps that need to go back to the Planner before implementation starts. Be concrete — "seems fine" is not a validation. Then `git push`. This runs on an ephemeral runner — a commit that never reaches the remote is indistinguishable from work that never happened once the job ends.
 
 Do not rewrite the plan yourself. Your job is to catch what the Planner missed, not to replace their work.

@@ -122,10 +122,10 @@ The workflow's `SAVE_DEBUG_ARTIFACTS=true` step already produces exactly what's 
 
 ## Git as the inter-stage handoff mechanism
 
-Every stage-agent commits its own work to the shared feature branch, with a substantive commit message — not just code changes, but a record of *why*. Concretely:
+Every stage-agent commits its own work to the shared feature branch, with a substantive commit message — not just code changes, but a record of *why* — **and pushes it immediately, every time, not just at the end of the run.** This is not optional polish: the pipeline runs on an ephemeral GitHub Actions runner, and a commit that only exists in that runner's local working copy is gone the instant the job ends, no matter how completely a later checkpoint comment describes it. The first real dogfooded run against issue #1 lost a full pipeline pass this way — Analyzer through Tester all genuinely ran, 19 tests genuinely passed, and none of it was ever pushed, because the only place this design originally said "push" was the Deployer, which never runs in the (common) case where no live check is warranted. Every stage now pushes its own commits; don't reintroduce a single point of failure here by consolidating this back down to one stage's job.
 
 - Analyzer commits `.agents/analysis.md` (scope confirmation, risk classification, any caveats found).
-- Planner commits `.agents/plan.md` (the seams it's introducing, the test table, an explicit checklist mapping each issue acceptance criterion to a test case — see "The Planner" below).
+- Planner commits `.agents/plan.md` (the seams it's introducing, plus the task breakdown and coverage checklist — see "The Planner" below).
 - Plan Validator (when invoked) commits `.agents/plan-validation.md`.
 - Each per-task Implementer subagent commits its own code + tests as separate red/green/refactor commits — the commit history *is* the TDD record, which is the reason to do this in git rather than a scratch file. Across a multi-task plan, the branch ends up with one red/green/refactor cluster per task, in order, which is itself a readable trace of how the feature was actually built.
 - Tester commits any fixes it had to make.

@@ -69,6 +69,27 @@ jobs:
             "Pipeline stages" in the doc. Follow "Failure handling" in the
             doc for what to do when a stage can't proceed cleanly.
 
+            CRITICAL, non-negotiable: run `git push` yourself (not a
+            subagent's job -- yours, since you're the one who knows when
+            each stage actually finished) immediately after every single
+            stage's commit(s) land, including after each individual
+            Implementer task dispatch, not just at the end. This job runs on
+            an ephemeral runner -- anything committed but not pushed before
+            the job ends is permanently lost the moment the runner is torn
+            down, no matter how completely you describe it in a checkpoint
+            comment afterward. Do not treat "the Deployer will push
+            eventually" as covering this -- Deployer does not run in this
+            job at all when no live check is warranted, which is the common
+            case, so it is never a substitute for you pushing as you go.
+
+            Before your turn ends for ANY reason -- normal completion after
+            Tester, a Failure Handling stop, anything -- confirm with `git
+            status` and `git log origin/<branch>..HEAD` (or equivalent) that
+            there is nothing committed locally that isn't already on the
+            remote branch. If there is, push it before you stop. A
+            checkpoint comment describing work that isn't actually on the
+            remote branch is worse than no comment at all.
+
             You do not have live network access to Amazon and must not add
             any. Do not perform a live Amazon check yourself under any
             circumstances -- that is the Tester's determination only
@@ -213,6 +234,13 @@ jobs:
             either stage can't proceed cleanly -- post a comment on the
             issue (or the PR, if Deployer has opened one) explaining what
             happened, then stop.
+
+            CRITICAL, non-negotiable, same as every other stage in this
+            pipeline: `git push` yourself immediately after every commit,
+            including the PR Risk Analyzer's. This job runs on an ephemeral
+            runner -- anything committed but not pushed before it ends is
+            gone. Don't rely on Deployer's own push at the very end to cover
+            PR Risk Analyzer's commit too; push after each one separately.
 
             You do not have live network access to Amazon and must not add
             any -- the one live check for this run already happened.
