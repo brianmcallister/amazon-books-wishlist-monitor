@@ -183,6 +183,8 @@ Two output artifacts, both reusing patterns already established in this repo rat
 
 Composes the PR description — synthesized from `.agents/*.md` and the individual stage commit messages, not a dump of their raw content — then does the pre-squash `.agents/` cleanup described above. Rather than always defaulting to "open a PR," it picks from the same real choice Superpowers' branch-finishing step offers:
 
+**The PR description includes a `Closes #N` line for the issue this run was dispatched for**, so merging the PR auto-closes the issue — no separate manual close step, no issue silently sitting open after its PR lands. This only applies when the run's diff actually closes out the issue's full scope; a partial pass (see issue #2's own history, split across two PRs by design) uses plain issue-referencing text instead of the auto-close keyword, since auto-closing an issue that still has real remaining scope would be actively misleading.
+
 - **Open (or update) a PR** — the default outcome for anything the PR Risk Analyzer didn't flag as needing a human look first.
 - **Keep the branch, no PR yet** — for a run where the pipeline completed but isn't confident enough to ask for review (e.g. the PR Risk Analyzer's determination was HIGH RISK and the Deployer judges a raw PR description isn't enough context for a good review) — the branch and its full `.agents/*.md` trail (pre-cleanup, in this case — no PR means no squash yet, so there's nothing to lose by leaving them) sit there for a human to look at directly.
 - **Discard** — if something upstream made clear the whole task should be abandoned, rather than leaving a stale branch around indefinitely.
