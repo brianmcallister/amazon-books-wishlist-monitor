@@ -55,11 +55,79 @@ jobs:
           show_full_output: 'true'
           prompt: |
             You are the Orchestrator for this repo's agent pipeline. Read
-            CLAUDE.md and docs/AGENT_HARNESS.md in full before doing anything
-            else -- they are the spec for this run, not background reading.
+            CLAUDE.md first -- it's short and its load-bearing code list and
+            stage-order line are directly relevant to dispatching Analyzer
+            and interpreting its classification.
+
+            **You do not need to read docs/AGENT_HARNESS.md in full.**
+            Everything you need to run this pipeline correctly -- the stage
+            list, which subagent file and model each one uses, and how to
+            react to a stage that can't proceed -- is inlined below. That
+            doc has the full design rationale (why Superpowers, cost
+            levers, observability choices, explicit non-goals) if you want
+            deeper context on any specific decision, but it's ~11K tokens
+            of mostly background with no bearing on dispatching this run
+            correctly, and reading it buys you nothing operationally that
+            isn't already inlined here.
 
             ISSUE NUMBER: ${{ inputs.issue_number }}
             REPO: ${{ github.repository }}
+
+            PIPELINE STAGES -- dispatch each via the `Agent` tool with the
+            given subagent file, unless noted otherwise:
+            - Analyzer: `.claude/agents/analyzer.md` (Haiku 4.5,
+              `effort: low` by default -- override to Sonnet 5 via the
+              `Agent` tool's `model` param if the issue itself already
+              reads as likely scraping/SMTP-touching, since you won't have
+              Analyzer's own classification yet at dispatch time)
+            - Planner: `.claude/agents/planner.md` (Sonnet 5)
+            - Plan Validator: `.claude/agents/plan-validator.md` (Sonnet 5)
+              -- only dispatch this if Analyzer classified the task
+              scraping-touching; skip it entirely otherwise
+            - Implementer: `.claude/agents/implementer.md` (Sonnet 5) -- a
+              fresh dispatch per task in the Planner's breakdown, not one
+              dispatch for the whole plan
+            - Tester: `.claude/agents/tester.md` (Sonnet 5)
+            - Deployer: `.claude/agents/deployer.md` (Sonnet 5)
+            - PR Risk Analyzer: not a subagent -- `node
+              scripts/pr-risk-check.js <issue-number> <pr-number>` via
+              Bash, run after Deployer reports the PR number it opened or
+              updated
+
+            FAILURE HANDLING -- different failure modes get different
+            responses:
+            1. Infra-level crash (API error, runner blip, timeout) -- no
+               custom logic needed; re-running the same workflow with the
+               same issue number resumes from git state.
+            2. A stage can self-correct within its own scope (e.g. Tester
+               fixing an obvious bug, a per-task Implementer addressing its
+               own review findings) -- bounded to ONE attempt, then stop if
+               it doesn't hold.
+            3. A downstream stage rejects an upstream stage's work in a way
+               it can't fix itself (e.g. Plan Validator rejects the plan
+               outright) -- do NOT auto-loop back to re-run the earlier
+               stage. Stop with a comment explaining the disagreement; a
+               human decides how to proceed.
+            4. The live-check job itself fails or comes back inconclusive
+               -- report it as a terminal result, do not trigger the live
+               check again.
+            5. A stage needs human clarification (the Analyzer's core job)
+               -- stop rather than guess; put the specific gap in both the
+               stage's own commit and the issue comment.
+            6. A stage hits a real platform restriction it can't cross --
+               the known case is GitHub refusing any push touching
+               `.github/workflows/*` from this pipeline's credentials (not
+               a bug, a real GitHub-enforced restriction, not something to
+               retry). Stop, name the exact blocker and the exact diff
+               needed (usually already spelled out in `.agents/plan.md`)
+               in the issue comment, and wait for a human to apply it by
+               hand -- titled `Manual (#<issue-number>):
+               (<task-number>/<total-tasks>) <summary>.` -- and push it,
+               then re-trigger with the same issue number.
+
+            In every case above, post a comment on issue
+            #${{ inputs.issue_number }} explaining what happened and what's
+            needed, then stop.
 
             Include the issue number in every subagent dispatch prompt --
             each subagent's own instructions tell it to title its commits
@@ -90,35 +158,25 @@ jobs:
             check it out. The `.agents/*.md` list above was read directly
             from that branch's real committed tree via the GitHub API, not
             from any comment's prose -- trust it over a checkpoint comment's
-            claims about what finished, the same way "Git as the
-            inter-stage handoff mechanism" in docs/AGENT_HARNESS.md already
-            tells you to (this repo has hit the exact failure mode of a
-            checkpoint comment describing stages that were never actually
-            pushed). If that file list looks inconsistent with what a
-            checkpoint comment claims, or with what you find once you
-            actually look at `git log` yourself, say so explicitly and
-            trust the real git/API state, not the prose. See "How this
-            actually runs" -> "Fresh start vs. resume" in
-            docs/AGENT_HARNESS.md for the full reasoning behind this design
-            -- what's precomputed above is the mechanical part of it; how to
-            actually fold in new guidance or handle something that looks
-            wrong is still your judgment call, not the script's.
+            claims about what finished (this repo has hit the exact failure
+            mode of a checkpoint comment describing stages that were never
+            actually pushed). If that file list looks inconsistent with
+            what a checkpoint comment claims, or with what you find once
+            you actually look at `git log` yourself, say so explicitly and
+            trust the real git/API state, not the prose. What's precomputed
+            above is the mechanical part of the fresh-start/resume
+            decision; how to actually fold in new guidance or handle
+            something that looks wrong is still your judgment call, not
+            the script's.
 
-            Then run the pipeline stages in order -- Analyzer, Planner, Plan
-            Validator (only if the Analyzer classified the task
-            scraping-touching), Implementer (a fresh `Agent` tool dispatch of
-            `.claude/agents/implementer.md` per task in the Planner's
-            breakdown, not one dispatch for the whole plan), Tester -- then,
-            **only if the Tester determines a live Amazon check is NOT
-            warranted, continue in this same job/session** to Deployer, then
-            the PR Risk Analyzer script. Dispatch Deployer via the `Agent`
-            tool per "Pipeline stages" in the doc; once it reports the PR
-            number it opened or updated, run
-            `node scripts/pr-risk-check.js ${{ inputs.issue_number }}
-            <pr-number>` via Bash -- this is a deterministic script, not a
-            subagent dispatch, so there's nothing to invoke through the
-            `Agent` tool for this stage. Follow "Failure handling" in the
-            doc for what to do when a stage can't proceed cleanly.
+            Then run the pipeline stages in order, per the PIPELINE STAGES
+            list above -- Analyzer, Planner, Plan Validator (only if the
+            Analyzer classified the task scraping-touching), Implementer
+            (one fresh dispatch per task), Tester -- then, **only if the
+            Tester determines a live Amazon check is NOT warranted,
+            continue in this same job/session** to Deployer, then the PR
+            Risk Analyzer script, per FAILURE HANDLING above for what to do
+            when a stage can't proceed cleanly.
 
             The only reason to stop *before* Deployer/the PR Risk Analyzer
             script is if the Tester determines a live check IS warranted --
@@ -171,10 +229,6 @@ jobs:
             (warranted or not, with reasoning), carried out afterward, if
             warranted, by a separate approval-gated job, never by you.
 
-            Whenever the doc's "Failure handling" section says to stop, post
-            a comment on issue #${{ inputs.issue_number }} explaining what
-            happened and what's needed, then stop.
-
             **If the Tester determines a live check IS warranted**, stop
             right there -- do not attempt Deployer or the PR Risk Analyzer
             script yourself. Report your structured output and end; the
@@ -184,9 +238,10 @@ jobs:
             **If the Tester determines a live check is NOT warranted**,
             continue in this same session to Deployer, then the PR Risk
             Analyzer script. That's this job's normal successful ending: a
-            PR opened or updated (or Deployer's keep/discard choice, per
-            the doc) with its risk determination posted as a PR comment,
-            everything pushed, and a final comment/PR description in place.
+            PR opened or updated (or Deployer's own keep/discard choice,
+            per its own instructions) with its risk determination posted
+            as a PR comment, everything pushed, and a final comment/PR
+            description in place.
 
             Report structured output at the end: whether a live Amazon check
             is warranted per the Tester's determination, and `run_complete`
@@ -320,18 +375,27 @@ jobs:
             .agents/live-check-result.md and the new fixture just committed
             to test/fixtures/).
 
-            Read CLAUDE.md and docs/AGENT_HARNESS.md, then read
+            You do not need to read docs/AGENT_HARNESS.md in full for this
+            -- you're only running two stages, both covered below. Read
             `.agents/*.md` and recent commit history on this branch to
             understand what the pipeline already did. The Tester stage is
-            done. Continue with the remaining stages: Deployer first,
-            dispatched via the `Agent` tool per "Pipeline stages" in the
-            doc; once it reports the PR number it opened or updated, run
-            `node scripts/pr-risk-check.js ${{ inputs.issue_number }}
-            <pr-number>` via Bash -- that's a deterministic script, not a
-            subagent, so there's no `Agent` tool dispatch for it. Follow
-            "Failure handling" in the doc if either stage can't proceed
-            cleanly -- post a comment on the issue (or the PR, if Deployer
-            has opened one) explaining what happened, then stop.
+            done. Continue with the remaining stages:
+
+            1. Dispatch Deployer via the `Agent` tool with subagent file
+               `.claude/agents/deployer.md` (Sonnet 5) -- it reads the
+               stage trail itself and composes the PR description; you
+               don't need to pre-digest `.agents/*.md` for it beyond
+               confirming it's actually there.
+            2. Once Deployer reports the PR number it opened or updated,
+               run `node scripts/pr-risk-check.js
+               ${{ inputs.issue_number }} <pr-number>` via Bash -- that's a
+               deterministic script, not a subagent, so there's no `Agent`
+               tool dispatch for it.
+
+            If either stage can't proceed cleanly, post a comment on the
+            issue (or the PR, if Deployer has opened one) explaining what
+            happened and what's needed, then stop -- don't retry
+            speculatively or auto-loop back to an earlier stage.
 
             Include the issue number (${{ inputs.issue_number }}) in every
             subagent dispatch prompt, same as the earlier job -- each
