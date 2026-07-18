@@ -5,7 +5,8 @@
   "description": "Daily check of an Amazon wish list for books under a price threshold, emailed as a digest.",
   "main": "check-wishlist.js",
   "scripts": {
-    "check": "node check-wishlist.js"
+    "check": "node check-wishlist.js",
+    "test": "node --test"
   },
   "dependencies": {
     "nodemailer": "^9.0.3",

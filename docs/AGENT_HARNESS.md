@@ -220,7 +220,7 @@ The determination is the same fixed rubric as before, just evaluated in code ins
 Two output artifacts, both reusing patterns already established in this repo rather than inventing new infrastructure:
 
 1. A **PR comment** (via `gh pr comment`) stating the risk level and which rubric items fired — human-visible immediately, so a reviewer can sanity-check the call before merging.
-2. An append to **`.github/pr-risk-log.jsonl`** (one line per PR: `{pr, sha, risk, reasons, checks_passed, timestamp}`) — same "commit a small file back to the repo" idiom as `notified.json`. This is the evidence base for eventually deciding auto-merge is trustworthy. The script commits and pushes this itself. The file exists (currently empty, ready to append to) as of issue #2.
+2. An append to **`.github/pr-risk-log.jsonl`** (one line per PR: `{pr, sha, risk, reasons, checks_passed, timestamp}`) — same "commit a small file back to the repo" idiom as `notified.json`. This is the evidence base for eventually deciding auto-merge is trustworthy. The script commits and pushes this itself. The file has been live since issue #2, with its first real entry from PR #9's risk determination.
 
 Invoked by the Orchestrator via Bash, not the `Agent` tool: `node scripts/pr-risk-check.js <issue-number> <pr-number>`, using the PR number Deployer just reported.
 

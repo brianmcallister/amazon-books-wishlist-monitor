@@ -1,0 +1,25 @@
+name: Test
+
+# Required status check for branch protection on main (see docs/AGENT_HARNESS.md
+# and issue #2). Runs entirely against unit tests and fixtures -- no live
+# Amazon or SMTP calls, unlike check-wishlist.yml, so it's fast and safe to
+# run on every PR without the constraints that govern that workflow.
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm ci
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true' # unit tests don't launch a browser; skip the Chromium download
+
+      - run: npm test
