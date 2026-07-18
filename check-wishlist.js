@@ -83,27 +83,44 @@ async function scrapeWishlist(url) {
       }
     };
 
-    mergeItems(await extractCurrentItems());
-
-    let scrolled = 0;
-    const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
-    while (scrolled <= scrollHeight) {
-      await page.evaluate((y) => window.scrollBy(0, y), 800);
-      scrolled += 800;
-      await new Promise((resolve) => setTimeout(resolve, 250));
+    const scrollAndCollect = async () => {
       mergeItems(await extractCurrentItems());
+
+      let scrolled = 0;
+      const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
+      while (scrolled <= scrollHeight) {
+        await page.evaluate((y) => window.scrollBy(0, y), 800);
+        scrolled += 800;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        mergeItems(await extractCurrentItems());
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      mergeItems(await extractCurrentItems());
+
+      // Scroll back to the top so items that got virtualized away during the descent
+      // (in particular the cheapest ones, which sort first) get a final chance to
+      // re-render with their price populated.
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      mergeItems(await extractCurrentItems());
+    };
+
+    await scrollAndCollect();
+    console.log(`Unique items merged after first pass: ${itemMap.size}`);
+
+    // Amazon's wishlist fetches live prices via a client-side API call that sometimes
+    // fails outright for a subset of items (their own UI has a hidden "An error
+    // occurred, please try again in a moment" alert for exactly this case). A reload
+    // re-issues that call, so retry once for any item still missing a price.
+    const missingAfterFirstPass = Array.from(itemMap.values()).filter((i) => i.priceText === null).length;
+    if (missingAfterFirstPass > 0) {
+      console.log(`${missingAfterFirstPass} item(s) still missing a price after first pass. Reloading and retrying once...`);
+      await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await scrollAndCollect();
+      const missingAfterRetry = Array.from(itemMap.values()).filter((i) => i.priceText === null).length;
+      console.log(`${missingAfterRetry} item(s) still missing a price after retry.`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    mergeItems(await extractCurrentItems());
-
-    // Scroll back to the top so items that got virtualized away during the descent
-    // (in particular the cheapest ones, which sort first) get a final chance to
-    // re-render with their price populated.
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    mergeItems(await extractCurrentItems());
-
-    console.log(`Unique items merged across scroll passes: ${itemMap.size}`);
 
     if (process.env.SAVE_DEBUG_ARTIFACTS === 'true') {
       await page.screenshot({ path: 'wishlist-debug.png', fullPage: true });
