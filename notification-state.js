@@ -51,6 +51,16 @@ function buildUpdatedState(state, freshMatches, now) {
   return updated;
 }
 
+function pruneState(state, now) {
+  const pruned = {};
+  for (const [asin, notifiedAtIso] of Object.entries(state)) {
+    if (isSuppressed(notifiedAtIso, now)) {
+      pruned[asin] = notifiedAtIso;
+    }
+  }
+  return pruned;
+}
+
 module.exports = {
   SUPPRESSION_WINDOW_DAYS,
   SUPPRESSION_WINDOW_MS,
@@ -60,4 +70,5 @@ module.exports = {
   isSuppressed,
   partitionMatches,
   buildUpdatedState,
+  pruneState,
 };

@@ -10,6 +10,7 @@ const {
   isSuppressed,
   partitionMatches,
   buildUpdatedState,
+  pruneState,
 } = require('../notification-state');
 
 test('extractAsin extracts the 10-character ASIN from a /dp/ URL', () => {
@@ -101,4 +102,17 @@ test('buildUpdatedState sets the current timestamp for every fresh match, leavin
     B003P9VZLQ: '2026-07-18T00:00:00.000Z',
   });
   assert.deepEqual(state, { B0099999ZZ: '2026-07-01T00:00:00.000Z' }); // not mutated
+});
+
+test('pruneState removes entries older than 14 days and keeps recent ones', () => {
+  const now = new Date('2026-07-18T00:00:00.000Z');
+  const state = {
+    RECENT000A: new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString(), // 1 day ago, kept
+    STALE0000B: new Date(now.getTime() - 20 * 24 * 60 * 60 * 1000).toISOString(), // 20 days ago, pruned
+    BOUNDARY0C: new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString(), // exactly 14 days, pruned
+  };
+
+  const pruned = pruneState(state, now);
+
+  assert.deepEqual(pruned, { RECENT000A: state.RECENT000A });
 });
