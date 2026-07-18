@@ -55,7 +55,7 @@ async function scrapeWishlist(url) {
 
     const items = await page.evaluate(() => {
       const results = [];
-      document.querySelectorAll('[data-itemid]').forEach((el) => {
+      document.querySelectorAll('[id^="item_"]').forEach((el) => {
         const titleEl = el.querySelector('[id^="itemName_"]') || el.querySelector('a[href*="/dp/"]');
         const priceEl =
           el.querySelector('[id^="itemPrice_"]') ||
