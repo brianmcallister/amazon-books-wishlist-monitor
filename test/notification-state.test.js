@@ -122,3 +122,7 @@ test('formatSuppressionSummary formats the exact required summary line', () => {
   const line = formatSuppressionSummary({ totalMatches: 3, suppressedCount: 1, freshCount: 2, threshold: 5 });
   assert.equal(line, '3 item(s) under $5. 1 already notified within 14 days, suppressed. 2 fresh match(es).');
 });
+
+test('DELIBERATELY FAILING -- verifying CI wiring blocks a bad PR (throwaway, will be closed)', () => {
+  assert.equal(1, 2);
+});
