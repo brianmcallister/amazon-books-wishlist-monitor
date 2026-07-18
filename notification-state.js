@@ -42,6 +42,15 @@ function partitionMatches(matches, state, now) {
   return { freshMatches, suppressedMatches };
 }
 
+function buildUpdatedState(state, freshMatches, now) {
+  const updated = { ...state };
+  const nowIso = now.toISOString();
+  for (const match of freshMatches) {
+    updated[extractAsin(match.url)] = nowIso;
+  }
+  return updated;
+}
+
 module.exports = {
   SUPPRESSION_WINDOW_DAYS,
   SUPPRESSION_WINDOW_MS,
@@ -50,4 +59,5 @@ module.exports = {
   saveNotifiedState,
   isSuppressed,
   partitionMatches,
+  buildUpdatedState,
 };

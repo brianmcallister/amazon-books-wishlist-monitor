@@ -9,6 +9,7 @@ const {
   saveNotifiedState,
   isSuppressed,
   partitionMatches,
+  buildUpdatedState,
 } = require('../notification-state');
 
 test('extractAsin extracts the 10-character ASIN from a /dp/ URL', () => {
@@ -86,4 +87,18 @@ test('partitionMatches splits matches into fresh and suppressed using the 14-day
 
   assert.deepEqual(freshMatches.map((m) => m.url), [longAgoNotifiedUrl, neverNotifiedUrl]);
   assert.deepEqual(suppressedMatches.map((m) => m.url), [recentlyNotifiedUrl]);
+});
+
+test('buildUpdatedState sets the current timestamp for every fresh match, leaving other entries untouched', () => {
+  const now = new Date('2026-07-18T00:00:00.000Z');
+  const state = { B0099999ZZ: '2026-07-01T00:00:00.000Z' };
+  const freshMatches = [{ title: 'New match', url: 'https://www.amazon.com/dp/B003P9VZLQ/ref=x' }];
+
+  const updated = buildUpdatedState(state, freshMatches, now);
+
+  assert.deepEqual(updated, {
+    B0099999ZZ: '2026-07-01T00:00:00.000Z',
+    B003P9VZLQ: '2026-07-18T00:00:00.000Z',
+  });
+  assert.deepEqual(state, { B0099999ZZ: '2026-07-01T00:00:00.000Z' }); // not mutated
 });
