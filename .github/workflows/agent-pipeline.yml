@@ -30,6 +30,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      id-token: write
     outputs:
       live_check_warranted: ${{ steps.extract.outputs.live_check_warranted }}
       branch: ${{ steps.extract.outputs.branch }}
@@ -112,6 +113,7 @@ jobs:
       pull-requests: write
       issues: write
       actions: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
