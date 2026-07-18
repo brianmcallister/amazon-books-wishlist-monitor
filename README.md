@@ -26,6 +26,7 @@ Settings → Secrets and variables → Actions → Secrets:
 - `SMTP_SECURE` — `true` for port 465, `false` for 587/STARTTLS
 - `SMTP_USER` — mailbox username
 - `SMTP_PASS` — app-specific password (not your regular account password)
+- `STATE_COMMIT_TOKEN` — fine-grained PAT (Contents: Read and write, scoped to this repo only) used to push `notified.json` straight to `main`. Required because branch protection on `main` rejects the default `GITHUB_TOKEN` for that push; the PAT's owner must also be on the `main` branch ruleset's bypass list (Settings → Rules → Rulesets).
 
 ### Optional repo variables
 
