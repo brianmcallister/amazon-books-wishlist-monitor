@@ -19,14 +19,22 @@ This repo's own commit history is five rounds of bugs that only ever showed up w
 
 [obra/superpowers](https://github.com/obra/superpowers) is a cross-platform, installable Claude Code skills plugin implementing a similar-in-spirit chain — brainstorming → git worktrees → planning → subagent-per-task development with two-stage review → TDD → code review → branch finishing. Two independent designs landing on the same shape is a good sign the shape is right, and there's no reason to hand-roll what it already does well:
 
-- **Planning** should use Superpowers' plan-writing skill for the actual task-breakdown mechanics (bite-sized tasks, exact file paths, verification steps), rather than us maintaining a competing format. Our own addition on top — the coverage checklist mapping every plan item back to the source issue's acceptance criteria — stays ours, because it's specific to this pipeline being issue-driven, which a general planning skill has no way to know about.
-- **TDD execution** should invoke Superpowers' TDD skill directly for RED-GREEN-REFACTOR, rather than `implementer.md` re-explaining the same philosophy in different words.
-- **Implementation moves from one Implementer-per-feature to a fresh subagent per task**, matching Superpowers' pattern, with a two-stage review (spec compliance, then code quality) after each task before the next one starts — see "The Implementer," below. This is a real improvement over the single-pass Implementer this doc originally described, not just a naming change.
+- **Planning** should use Superpowers' `writing-plans` skill for the actual task-breakdown mechanics (bite-sized tasks, exact file paths, verification steps), rather than us maintaining a competing format. Our own addition on top — the coverage checklist mapping every plan item back to the source issue's acceptance criteria — stays ours, because it's specific to this pipeline being issue-driven, which a general planning skill has no way to know about. One override: the skill's own default save location (`docs/superpowers/plans/YYYY-MM-DD-<name>.md`) is ignored — this pipeline's plan always lands at `.agents/plan.md`, since every other stage and the Deployer's pre-squash cleanup depend on that exact path.
+- **TDD execution** should invoke Superpowers' `test-driven-development` skill directly for RED-GREEN-REFACTOR, rather than `implementer.md` re-explaining the same philosophy in different words.
+- **Review** should invoke Superpowers' `requesting-code-review` / `receiving-code-review` skills for the two-stage per-task review, rather than us defining a competing severity rubric.
+- **Implementation moves from one Implementer-per-feature to a fresh subagent per task**, matching the *pattern* Superpowers' `subagent-driven-development` skill validates — fresh subagent per task, two-stage review — with a two-stage review (spec compliance, then code quality) after each task before the next one starts — see "The Implementer," below. This is a real improvement over the single-pass Implementer this doc originally described, not just a naming change. **We do not use that skill's own dispatch mechanism** (it's a bash-script-driven controller pattern — task briefs and review packages as files, invoked via shell commands — built for a human or script shelling out locally). Our dispatch is the Orchestrator's own use of the `Agent` tool, one call per task, with git commits as the handoff (see "Git as the inter-stage handoff mechanism," below) — mechanically different, same shape, and the one that actually fits running unattended inside a GitHub Actions job.
 - **Branch finishing gets a real choice**, not an assumed default: merge (not available yet — see the auto-merge non-goal), open a PR, keep the branch without a PR, or discard — see "Deployer," below.
 
 **What stays ours, deliberately, because it's either specific to this project or Superpowers' README doesn't cover it at all:** the risk-scaled *conditional* invocation of stages (Superpowers' gates read as uniform, always-on; ours skip stages entirely for low-stakes work), model and cost tuning per stage (no mention of this in Superpowers), the single-live-external-API-hit-per-run constraint (specific to this project's actual Amazon-throttling history), the GitHub-Actions-native unattended trigger/resume mechanics below (Superpowers reads as built for a human answering questions in real time, not a red/green Actions run resumed via issue comments hours later), and the PR Risk Analyzer's shadow-mode auto-merge track record.
 
 **No separate whole-diff code-review stage was added, on purpose.** It might look like a gap next to Superpowers' dedicated code-review step, but the two-stage per-task review (below) already covers code quality at the point where it's cheapest to fix, Plan Validator already covers plan-level soundness before any code exists, and PR Risk Analyzer already does a final holistic pass for merge-risk purposes. A fourth review layer on top of those three would be redundant, not additive.
+
+### Installing Superpowers (verified against the real repo, not assumed)
+
+`obra/superpowers` is itself a self-contained Claude Code plugin — its repo root carries `.claude-plugin/plugin.json` directly (currently pinned at tag `v6.1.1`), not just a skills folder needing a wrapper. That means two different install paths make sense for the two different ways this repo runs Claude Code, and neither is a guess:
+
+- **Interactive/human sessions** (someone with this repo open locally, or an Orchestrator session with no special CLI flags): this repo's `.claude/settings.json` declares Superpowers' marketplace under `extraKnownMarketplaces` (the documented "team marketplaces" mechanism — see Claude Code's plugin docs). Opening this repo in a trusted Claude Code session prompts to install it from there; a human confirms once.
+- **The CI pipeline** (`agent-pipeline.yml`, issue #3): marketplace-based install depends on an interactive trust prompt that doesn't exist in an unattended job. The Claude Code Action turns out to have first-class inputs for exactly this, so `agent-pipeline.yml` uses those directly rather than a CLI flag threaded through `claude_args`: `plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git` and `plugins: superpowers@superpowers-marketplace` on every `anthropics/claude-code-action@v1` step in that workflow. No marketplace registration step, no trust prompt — the action adds the marketplace and installs the plugin before running Claude, every time, deterministically.
 
 ## Risk classification (the thing everything else branches on)
 
@@ -78,6 +86,7 @@ Tool-list restriction on the subagents reduces the *surface* for a stage to reac
 
 | Stage | Subagent file | Default model | Live Amazon? |
 |---|---|---|---|
+| Orchestrator | not a subagent file — the top-level session `agent-pipeline.yml` invokes directly | Sonnet 5 | No — routes and dispatches only |
 | Analyzer | `.claude/agents/analyzer.md` | Haiku 4.5 (Orchestrator overrides to Sonnet 5 for anything that might be scraping-touching) | No |
 | Planner | `.claude/agents/planner.md` | Sonnet 5 | No |
 | Plan Validator | `.claude/agents/plan-validator.md` | Sonnet 5 | No — only invoked when the Analyzer classified the task scraping-touching |
@@ -168,7 +177,7 @@ The determination is a fixed rubric, not a subjective call — that's what makes
 Two output artifacts, both reusing patterns already established in this repo rather than inventing new infrastructure:
 
 1. A **PR comment** stating the risk level and which rubric items fired — human-visible immediately, so a reviewer can sanity-check the call before merging.
-2. An append to **`.github/pr-risk-log.jsonl`** (one line per PR: `{pr, sha, risk, reasons, checks_passed, timestamp}`) — same "commit a small file back to the repo" idiom as `notified.json`. This is the evidence base for eventually deciding auto-merge is trustworthy.
+2. An append to **`.github/pr-risk-log.jsonl`** (one line per PR: `{pr, sha, risk, reasons, checks_passed, timestamp}`) — same "commit a small file back to the repo" idiom as `notified.json`. This is the evidence base for eventually deciding auto-merge is trustworthy. The file exists (currently empty, ready to append to) as of issue #2.
 
 ## Deployer
 
@@ -196,6 +205,5 @@ Composes the PR description — synthesized from `.agents/*.md` and the individu
 
 ## Open questions (tracked in follow-up issues, not resolved here)
 
-- Exact `.github/workflows/agent-pipeline.yml` YAML, including the precise Claude Code Action invocation syntax for each stage and the two-job (main + approval-gated live-check) structure described above — the design here is settled, the implementation is not yet written (issue #3).
-- Exact CI wiring for the required `npm test` status check — blocked on issue #1 landing first, since there's no test suite or `npm test` script in this repo yet (issue #2).
-- How the Superpowers plugin actually gets installed for this repo so its skills are available both interactively and to the Claude Code invocations running inside `agent-pipeline.yml` — needs verifying against Superpowers' own install instructions rather than guessing at plugin-manifest syntax (issue #4).
+- Exact CI wiring for the required `npm test` status check, plus branch protection requiring it — blocked on issue #1 landing first, since there's no test suite or `npm test` script in this repo yet (issue #2).
+- `.github/workflows/agent-pipeline.yml` (issue #3) and the Superpowers install wiring inside it (issue #4) are both written, grounded in the real, verified `anthropics/claude-code-action@v1` inputs and the real Superpowers plugin structure — but neither has been exercised by an actual run yet. Issue #3's own testing guidance calls for a mechanics-only dry run (a fresh/resume cycle through at least the Analyzer and Planner stages) before trusting it against a real issue, specifically without spending the one live-Amazon-check budget on that dry run. The `live-amazon-check` job also depends on a GitHub Environment named `live-amazon-check` with required reviewers actually being configured in repo Settings — that's a manual step this repo work can't do on its own; flag it rather than assume it's done.

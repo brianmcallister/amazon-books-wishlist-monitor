@@ -1,0 +1,214 @@
+name: Agent Pipeline
+
+# Single trigger, single input: the Actions "Run workflow" button both starts a
+# fresh pipeline run and resumes one that stopped early. See
+# docs/AGENT_HARNESS.md -> "How this actually runs" for the full design this
+# file implements -- that doc is the spec; this file should not duplicate its
+# reasoning, only its mechanics.
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to work (fresh start if its branch does not exist yet, resume otherwise)'
+        required: true
+        type: string
+
+run-name: "Pipeline: issue #${{ inputs.issue_number }}"
+
+concurrency:
+  group: pipeline-${{ inputs.issue_number }}
+
+env:
+  SUPERPOWERS_MARKETPLACE: https://github.com/obra/superpowers-marketplace.git
+  SUPERPOWERS_PLUGIN: superpowers@superpowers-marketplace
+
+jobs:
+  orchestrator:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      live_check_warranted: ${{ steps.extract.outputs.live_check_warranted }}
+      branch: ${{ steps.extract.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: run-claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: ${{ env.SUPERPOWERS_MARKETPLACE }}
+          plugins: ${{ env.SUPERPOWERS_PLUGIN }}
+          prompt: |
+            You are the Orchestrator for this repo's agent pipeline. Read
+            CLAUDE.md and docs/AGENT_HARNESS.md in full before doing anything
+            else -- they are the spec for this run, not background reading.
+
+            ISSUE NUMBER: ${{ inputs.issue_number }}
+            REPO: ${{ github.repository }}
+
+            Follow "How this actually runs" -> "Fresh start vs. resume" in
+            docs/AGENT_HARNESS.md exactly: resolve the branch name from the
+            issue number, determine whether this is a fresh start (branch
+            doesn't exist -> create it from main) or a resume (branch exists
+            -> read which `.agents/*.md` files are already committed and the
+            issue's comment thread for guidance since your last checkpoint).
+
+            Then run the pipeline stages in order -- Analyzer, Planner, Plan
+            Validator (only if the Analyzer classified the task
+            scraping-touching), Implementer (a fresh `Agent` tool dispatch of
+            `.claude/agents/implementer.md` per task in the Planner's
+            breakdown, not one dispatch for the whole plan), Tester --
+            dispatching each stage's subagent via the `Agent` tool per
+            "Pipeline stages" in the doc. Follow "Failure handling" in the
+            doc for what to do when a stage can't proceed cleanly.
+
+            You do not have live network access to Amazon and must not add
+            any. Do not perform a live Amazon check yourself under any
+            circumstances -- that is the Tester's determination only
+            (warranted or not, with reasoning), carried out afterward, if
+            warranted, by a separate approval-gated job, never by you.
+
+            Whenever the doc's "Failure handling" section says to stop, post
+            a comment on issue #${{ inputs.issue_number }} explaining what
+            happened and what's needed, then stop.
+
+            If the pipeline reaches the end of the Tester stage without
+            needing to stop, that's this job's normal successful ending too
+            -- do not attempt the PR Risk Analyzer or Deployer stages
+            yourself; report your structured output and end. If a live check
+            is warranted, the second job picks up PR Risk Analyzer and
+            Deployer after it completes. If no live check is warranted, post
+            a comment on the issue noting the pipeline is ready for the PR
+            Risk Analyzer and Deployer stages, since nothing else in this
+            workflow currently continues automatically down that path.
+
+            Report structured output at the end: the branch name you
+            resolved/created, and whether a live Amazon check is warranted
+            per the Tester's determination.
+          claude_args: |
+            --model claude-sonnet-5
+            --json-schema '{"type":"object","properties":{"branch":{"type":"string"},"live_check_warranted":{"type":"boolean"},"summary":{"type":"string"}},"required":["branch","live_check_warranted","summary"]}'
+
+      - name: Extract structured output
+        id: extract
+        run: |
+          OUTPUT='${{ steps.run-claude.outputs.structured_output }}'
+          echo "branch=$(echo "$OUTPUT" | jq -r '.branch')" >> "$GITHUB_OUTPUT"
+          echo "live_check_warranted=$(echo "$OUTPUT" | jq -r '.live_check_warranted')" >> "$GITHUB_OUTPUT"
+
+  live-amazon-check:
+    needs: orchestrator
+    if: needs.orchestrator.outputs.live_check_warranted == 'true'
+    runs-on: ubuntu-latest
+    environment: live-amazon-check
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.orchestrator.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Trigger check-wishlist.yml and wait for it
+        id: trigger-live-check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const branch = '${{ needs.orchestrator.outputs.branch }}';
+            const dispatchedAt = Date.now();
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo,
+              workflow_id: 'check-wishlist.yml',
+              ref: branch,
+            });
+
+            let run;
+            for (let attempt = 0; attempt < 30 && !run; attempt++) {
+              await new Promise((r) => setTimeout(r, 10000));
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo,
+                workflow_id: 'check-wishlist.yml',
+                branch,
+                event: 'workflow_dispatch',
+                per_page: 5,
+              });
+              run = data.workflow_runs.find(
+                (r) => new Date(r.created_at).getTime() >= dispatchedAt - 5000
+              );
+            }
+            if (!run) {
+              core.setFailed('Timed out waiting for the triggered check-wishlist.yml run to appear.');
+              return;
+            }
+
+            while (run.status !== 'completed') {
+              await new Promise((r) => setTimeout(r, 15000));
+              ({ data: run } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: run.id }));
+            }
+
+            core.setOutput('run_id', String(run.id));
+            core.setOutput('conclusion', run.conclusion);
+
+      - name: Download the live check's debug artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wishlist-debug
+          path: live-check-artifact
+          run-id: ${{ steps.trigger-live-check.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit the new fixture
+        run: |
+          mkdir -p test/fixtures
+          stamp=$(date -u +%Y%m%d-%H%M%S)
+          cp live-check-artifact/wishlist-debug.html "test/fixtures/wishlist-live-check-${stamp}.html"
+          mkdir -p .agents
+          printf 'Live Amazon check for issue #%s: workflow run %s, conclusion %s.\n' \
+            "${{ inputs.issue_number }}" \
+            "${{ steps.trigger-live-check.outputs.run_id }}" \
+            "${{ steps.trigger-live-check.outputs.conclusion }}" > .agents/live-check-result.md
+          git config user.name "claude[bot]"
+          git config user.email "41898282+claude[bot]@users.noreply.github.com"
+          git add test/fixtures/ .agents/live-check-result.md
+          git commit -m "Add fixture from approved live Amazon check (issue #${{ inputs.issue_number }})"
+          git push
+
+      - id: run-claude-continue
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: ${{ env.SUPERPOWERS_MARKETPLACE }}
+          plugins: ${{ env.SUPERPOWERS_PLUGIN }}
+          prompt: |
+            You are resuming this repo's agent pipeline for issue
+            #${{ inputs.issue_number }}, on branch
+            ${{ needs.orchestrator.outputs.branch }}, immediately after an
+            approved, now-complete live Amazon check (see
+            .agents/live-check-result.md and the new fixture just committed
+            to test/fixtures/).
+
+            Read CLAUDE.md and docs/AGENT_HARNESS.md, then read
+            `.agents/*.md` and recent commit history on this branch to
+            understand what the pipeline already did. The Tester stage is
+            done. Continue with the remaining stages: PR Risk Analyzer, then
+            Deployer, dispatching each via the `Agent` tool per "Pipeline
+            stages" in the doc. Follow "Failure handling" in the doc if
+            either stage can't proceed cleanly -- post a comment on the
+            issue (or the PR, if Deployer has opened one) explaining what
+            happened, then stop.
+
+            You do not have live network access to Amazon and must not add
+            any -- the one live check for this run already happened.
+          claude_args: |
+            --model claude-sonnet-5
