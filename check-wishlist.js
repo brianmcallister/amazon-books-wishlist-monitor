@@ -43,29 +43,67 @@ async function scrapeWishlist(url) {
     console.log(`Final URL: ${page.url()}`);
     console.log(`Page title: ${await page.title()}`);
 
-    await page.evaluate(async () => {
-      await new Promise((resolve) => {
-        let total = 0;
-        const timer = setInterval(() => {
-          window.scrollBy(0, 800);
-          total += 800;
-          if (total > document.body.scrollHeight) {
-            clearInterval(timer);
-            resolve();
-          }
-        }, 200);
-      });
-    });
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-
     const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 300));
     if (/robot|captcha|automated access|unusual traffic|api-services-support/i.test(bodyText)) {
       console.log('WARNING: page body looks like a bot-check/CAPTCHA page, not the wishlist.');
       console.log(`Body text preview: ${bodyText.replace(/\s+/g, ' ').trim()}`);
     }
 
-    const containerCount = await page.evaluate(() => document.querySelectorAll('[id^="item_"]').length);
-    console.log(`Container elements matched ([id^="item_"]): ${containerCount}`);
+    // Amazon virtualizes the wishlist: items scrolled out of view can have their price
+    // element unmounted before a single end-of-scroll read would catch it. So instead of
+    // reading once at the bottom, we read at every scroll step and merge by item id,
+    // keeping whichever pass actually saw a price.
+    const extractCurrentItems = () =>
+      page.evaluate(() => {
+        const results = [];
+        document.querySelectorAll('[id^="item_"]').forEach((el) => {
+          const titleEl = el.querySelector('[id^="itemName_"]') || el.querySelector('a[href*="/dp/"]');
+          const priceEl =
+            el.querySelector('[id^="itemPrice_"]') ||
+            el.querySelector('.a-price .a-offscreen') ||
+            el.querySelector('[class*="price"]');
+          if (!titleEl) return;
+          results.push({
+            id: el.id,
+            title: titleEl.textContent.trim(),
+            priceText: priceEl ? priceEl.textContent.trim() : null,
+            href: titleEl.tagName === 'A' ? titleEl.getAttribute('href') : titleEl.closest('a')?.getAttribute('href'),
+          });
+        });
+        return results;
+      });
+
+    const itemMap = new Map();
+    const mergeItems = (found) => {
+      for (const item of found) {
+        const existing = itemMap.get(item.id);
+        if (!existing || (existing.priceText === null && item.priceText !== null)) {
+          itemMap.set(item.id, item);
+        }
+      }
+    };
+
+    mergeItems(await extractCurrentItems());
+
+    let scrolled = 0;
+    const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
+    while (scrolled <= scrollHeight) {
+      await page.evaluate((y) => window.scrollBy(0, y), 800);
+      scrolled += 800;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      mergeItems(await extractCurrentItems());
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    mergeItems(await extractCurrentItems());
+
+    // Scroll back to the top so items that got virtualized away during the descent
+    // (in particular the cheapest ones, which sort first) get a final chance to
+    // re-render with their price populated.
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    mergeItems(await extractCurrentItems());
+
+    console.log(`Unique items merged across scroll passes: ${itemMap.size}`);
 
     if (process.env.SAVE_DEBUG_ARTIFACTS === 'true') {
       await page.screenshot({ path: 'wishlist-debug.png', fullPage: true });
@@ -73,25 +111,7 @@ async function scrapeWishlist(url) {
       console.log('Saved wishlist-debug.png and wishlist-debug.html');
     }
 
-    const items = await page.evaluate(() => {
-      const results = [];
-      document.querySelectorAll('[id^="item_"]').forEach((el) => {
-        const titleEl = el.querySelector('[id^="itemName_"]') || el.querySelector('a[href*="/dp/"]');
-        const priceEl =
-          el.querySelector('[id^="itemPrice_"]') ||
-          el.querySelector('.a-price .a-offscreen') ||
-          el.querySelector('[class*="price"]');
-        if (!titleEl) return;
-        results.push({
-          title: titleEl.textContent.trim(),
-          priceText: priceEl ? priceEl.textContent.trim() : null,
-          href: titleEl.tagName === 'A' ? titleEl.getAttribute('href') : titleEl.closest('a')?.getAttribute('href'),
-        });
-      });
-      return results;
-    });
-
-    return items.map((item) => ({
+    return Array.from(itemMap.values()).map((item) => ({
       title: item.title,
       price: parsePrice(item.priceText),
       priceText: item.priceText,
