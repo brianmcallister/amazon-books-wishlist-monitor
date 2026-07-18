@@ -99,12 +99,12 @@ The second real run against issue #1 hit this directly: Task 8 of its plan neede
 | Stage | Subagent file | Default model | Live Amazon? |
 |---|---|---|---|
 | Orchestrator | not a subagent file — the top-level session `agent-pipeline.yml` invokes directly | Sonnet 5 | No — routes and dispatches only |
-| Analyzer | `.claude/agents/analyzer.md` | Haiku 4.5 (Orchestrator overrides to Sonnet 5 for anything that might be scraping-touching) | No |
+| Analyzer | `.claude/agents/analyzer.md` | Haiku 4.5, `effort: low` (Orchestrator overrides to Sonnet 5 for anything that might be scraping-touching) | No |
 | Planner | `.claude/agents/planner.md` | Sonnet 5 | No |
 | Plan Validator | `.claude/agents/plan-validator.md` | Sonnet 5 | No — only invoked when the Analyzer classified the task scraping-touching |
 | Implementer | `.claude/agents/implementer.md` | Sonnet 5 | No — dispatched fresh, once per task in the plan, not once for the whole feature |
 | Tester | `.claude/agents/tester.md` | Sonnet 5 | Decides *whether* a live check is warranted; does not perform it itself — see the approval-gated job above |
-| PR Risk Analyzer | `.claude/agents/pr-risk-analyzer.md` | Haiku 4.5 | No |
+| PR Risk Analyzer | `.claude/agents/pr-risk-analyzer.md` | Haiku 4.5, `effort: low` | No |
 | Deployer | `.claude/agents/deployer.md` | Sonnet 5 | No — opens/updates the PR, does not merge |
 
 Haiku is deliberately used only for the two stages we designed to be *mechanical* rather than open-ended judgment (confirming a well-specified issue is complete; applying a fixed rubric) — the model choice is a consequence of that design decision, not a separate cost optimization layered on top. Planner, Implementer, and Tester never downgrade below Sonnet 5: a cheap model on the Planner in particular tends to cost more overall, since a bad plan poisons every stage that reads it.
@@ -211,8 +211,8 @@ Composes the PR description — synthesized from `.agents/*.md` and the individu
 
 ## Cost levers beyond model choice
 
-- **`effort` parameter** — same model, tunable reasoning depth. Cheap stages can also run at `effort: low` even on Sonnet, compounding with model choice.
-- **Prompt caching** — every stage re-reads the same issue text and this doc. Structuring that as a cached prefix (stable content first, volatile content — the specific task — last) cuts repeat-read cost to roughly a tenth of full price across a single pipeline run's six-plus stages.
+- **`effort` parameter** — same model, tunable reasoning depth, set via the `effort:` subagent frontmatter field (overrides the session's inherited level for that subagent only). Wired in for the Analyzer and PR Risk Analyzer specifically (`effort: low`) — the same two stages already on Haiku because their work is mechanical rubric-application rather than open-ended judgment; the model choice and the effort choice are two expressions of the same underlying reasoning, not independent levers. Deliberately *not* set on Planner, Plan Validator, Implementer, Tester, or Deployer — those stages' whole value is thoroughness, and cutting effort there is exactly the wrong place to save money.
+- **Prompt caching — real, but only partially reliable across a multi-task run.** Measured directly (dispatching two fresh Implementer subagents locally, reading the raw API `usage` data): a second Implementer dispatch in the same session *did* get a real cache hit on the large shared system-prompt content, rather than paying full price again. But `claude-code-action` uses the standard 5-minute ephemeral cache tier (confirmed from real production logs — not the 1-hour tier, which isn't exposed as a configurable option at the `claude_args` level anyway, and wouldn't clearly be worth it even if it were: 1-hour cache writes cost 2x base input versus 1.25x for 5-minute, with zero benefit for anything that lands within 5 minutes anyway). A real Implementer task can easily take several minutes on its own, so later tasks in an 8-task run aren't guaranteed to land inside that window — don't assume this saves money on every dispatch, only when they happen to land close together in time.
 
 ## Observability
 
