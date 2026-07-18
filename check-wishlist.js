@@ -1,3 +1,5 @@
+require('dns').setDefaultResultOrder('ipv4first');
+
 const fs = require('fs');
 const puppeteer = require('puppeteer');
 const nodemailer = require('nodemailer');
