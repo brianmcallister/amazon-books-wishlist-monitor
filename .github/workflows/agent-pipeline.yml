@@ -33,12 +33,18 @@ jobs:
       id-token: write
     outputs:
       live_check_warranted: ${{ steps.extract.outputs.live_check_warranted }}
-      branch: ${{ steps.extract.outputs.branch }}
+      branch: ${{ steps.resolve.outputs.branch }}
       run_complete: ${{ steps.extract.outputs.run_complete }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Resolve branch and resume state
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/resolve-pipeline-state.js "${{ inputs.issue_number }}"
 
       - id: run-claude
         uses: anthropics/claude-code-action@v1
@@ -65,12 +71,38 @@ jobs:
             works if each subagent actually knows the number, so don't leave
             it implicit.
 
-            Follow "How this actually runs" -> "Fresh start vs. resume" in
-            docs/AGENT_HARNESS.md exactly: resolve the branch name from the
-            issue number, determine whether this is a fresh start (branch
-            doesn't exist -> create it from main) or a resume (branch exists
-            -> read which `.agents/*.md` files are already committed and the
-            issue's comment thread for guidance since your last checkpoint).
+            PRECOMPUTED FACTS (from `scripts/resolve-pipeline-state.js`,
+            already run as a step before you -- these are facts, not your
+            own guesses, so use them instead of re-deriving any of this
+            yourself via tool calls):
+            BRANCH: ${{ steps.resolve.outputs.branch }}
+            THIS RUN IS A: ${{ steps.resolve.outputs.is_resume == 'true' && 'RESUME (this branch already exists)' || 'FRESH START (this branch does not exist yet)' }}
+            .agents/*.md FILES ALREADY COMMITTED ON THAT BRANCH (empty on a
+            fresh start, or if none have landed yet): ${{ steps.resolve.outputs.agents_files_present }}
+            A PRIOR PIPELINE CHECKPOINT COMMENT WAS FOUND ON THE ISSUE: ${{ steps.resolve.outputs.last_checkpoint_found }}
+            NEW ISSUE COMMENTS SINCE THAT LAST CHECKPOINT (empty means
+            nothing new to fold in -- just retry whatever stage stopped,
+            plain, no correction):
+            ${{ steps.resolve.outputs.new_guidance }}
+
+            Use BRANCH exactly as given above -- do not recompute or rename
+            it yourself. If FRESH START, create it from `main`. If RESUME,
+            check it out. The `.agents/*.md` list above was read directly
+            from that branch's real committed tree via the GitHub API, not
+            from any comment's prose -- trust it over a checkpoint comment's
+            claims about what finished, the same way "Git as the
+            inter-stage handoff mechanism" in docs/AGENT_HARNESS.md already
+            tells you to (this repo has hit the exact failure mode of a
+            checkpoint comment describing stages that were never actually
+            pushed). If that file list looks inconsistent with what a
+            checkpoint comment claims, or with what you find once you
+            actually look at `git log` yourself, say so explicitly and
+            trust the real git/API state, not the prose. See "How this
+            actually runs" -> "Fresh start vs. resume" in
+            docs/AGENT_HARNESS.md for the full reasoning behind this design
+            -- what's precomputed above is the mechanical part of it; how to
+            actually fold in new guidance or handle something that looks
+            wrong is still your judgment call, not the script's.
 
             Then run the pipeline stages in order -- Analyzer, Planner, Plan
             Validator (only if the Analyzer classified the task
@@ -156,9 +188,11 @@ jobs:
             the doc) with its risk determination posted as a PR comment,
             everything pushed, and a final comment/PR description in place.
 
-            Report structured output at the end: the branch name you
-            resolved/created, whether a live Amazon check is warranted per
-            the Tester's determination, and `run_complete`. Set
+            Report structured output at the end: whether a live Amazon check
+            is warranted per the Tester's determination, and `run_complete`
+            (the branch name isn't part of this -- it's already a job
+            output sourced from the precomputed BRANCH fact above, not from
+            anything you report). Set
             `run_complete: false` if for ANY reason you did not reach a
             genuine, intentional stopping point of your own choosing --
             including if you notice your own turn being cut off,
@@ -176,14 +210,13 @@ jobs:
             --permission-mode bypassPermissions
             --max-turns 250
             --disallowedTools "ScheduleWakeup,mcp__*"
-            --json-schema '{"type":"object","properties":{"branch":{"type":"string"},"live_check_warranted":{"type":"boolean"},"run_complete":{"type":"boolean"},"summary":{"type":"string"}},"required":["branch","live_check_warranted","run_complete","summary"]}'
+            --json-schema '{"type":"object","properties":{"live_check_warranted":{"type":"boolean"},"run_complete":{"type":"boolean"},"summary":{"type":"string"}},"required":["live_check_warranted","run_complete","summary"]}'
 
       - name: Extract structured output
         id: extract
         env:
           STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
         run: |
-          echo "branch=$(echo "$STRUCTURED_OUTPUT" | jq -r '.branch')" >> "$GITHUB_OUTPUT"
           echo "live_check_warranted=$(echo "$STRUCTURED_OUTPUT" | jq -r '.live_check_warranted')" >> "$GITHUB_OUTPUT"
           echo "run_complete=$(echo "$STRUCTURED_OUTPUT" | jq -r '.run_complete')" >> "$GITHUB_OUTPUT"
 
