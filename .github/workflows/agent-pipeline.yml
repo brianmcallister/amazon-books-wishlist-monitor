@@ -55,6 +55,16 @@ jobs:
             ISSUE NUMBER: ${{ inputs.issue_number }}
             REPO: ${{ github.repository }}
 
+            Include the issue number in every subagent dispatch prompt --
+            each subagent's own instructions tell it to title its commits
+            `{Stage name} (#${{ inputs.issue_number }}): <summary>.` (the
+            Implementer additionally includes its task position, e.g.
+            `Implementer (#${{ inputs.issue_number }}): (3/8) <summary>.`),
+            so every commit this pipeline makes shows up on the issue's own
+            page with the actor and sequence clear at a glance -- that only
+            works if each subagent actually knows the number, so don't leave
+            it implicit.
+
             Follow "How this actually runs" -> "Fresh start vs. resume" in
             docs/AGENT_HARNESS.md exactly: resolve the branch name from the
             issue number, determine whether this is a fresh start (branch
@@ -251,7 +261,7 @@ jobs:
           git config user.name "claude[bot]"
           git config user.email "41898282+claude[bot]@users.noreply.github.com"
           git add test/fixtures/ .agents/live-check-result.md
-          git commit -m "Add fixture from approved live Amazon check (issue #${{ inputs.issue_number }})"
+          git commit -m "Live Check (#${{ inputs.issue_number }}): Add fixture from approved live Amazon check."
           git push
 
       - id: run-claude-continue
@@ -278,6 +288,11 @@ jobs:
             either stage can't proceed cleanly -- post a comment on the
             issue (or the PR, if Deployer has opened one) explaining what
             happened, then stop.
+
+            Include the issue number (${{ inputs.issue_number }}) in every
+            subagent dispatch prompt, same as the earlier job -- each
+            subagent's own instructions tell it to title its commits
+            `{Stage name} (#${{ inputs.issue_number }}): <summary>.`
 
             Log your progress the same way every other stage in this
             pipeline does: immediately before and after dispatching each
