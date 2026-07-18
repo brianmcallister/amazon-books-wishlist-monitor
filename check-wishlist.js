@@ -4,12 +4,21 @@ dns.setDefaultResultOrder('ipv4first');
 const fs = require('fs');
 const puppeteer = require('puppeteer');
 const nodemailer = require('nodemailer');
+const {
+  loadNotifiedState,
+  saveNotifiedState,
+  partitionMatches,
+  buildUpdatedState,
+  pruneState,
+  formatSuppressionSummary,
+} = require('./notification-state');
 
 const DEFAULT_WISHLIST_URL =
   'https://www.amazon.com/hz/wishlist/ls/9NVXER5P409J?type=wishlist&filter=unpurchased&sort=price-asc&viewType=list';
 
 const WISHLIST_URL = process.env.WISHLIST_URL || DEFAULT_WISHLIST_URL;
 const PRICE_THRESHOLD = Number(process.env.PRICE_THRESHOLD || 5);
+const NOTIFIED_STATE_PATH = 'notified.json';
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -204,15 +213,31 @@ async function sendEmail({ matches, totalScanned }) {
   }
 
   const matches = priced.filter((i) => i.price < PRICE_THRESHOLD);
-  console.log(`${matches.length} item(s) under $${PRICE_THRESHOLD}.`);
 
-  if (matches.length === 0) {
-    console.log('No email sent.');
+  const notifiedState = loadNotifiedState(NOTIFIED_STATE_PATH);
+  const now = new Date();
+  const { freshMatches, suppressedMatches } = partitionMatches(matches, notifiedState, now);
+
+  console.log(
+    formatSuppressionSummary({
+      totalMatches: matches.length,
+      suppressedCount: suppressedMatches.length,
+      freshCount: freshMatches.length,
+      threshold: PRICE_THRESHOLD,
+    })
+  );
+
+  if (freshMatches.length === 0) {
+    console.log('No email sent (all matches already notified recently).');
     return;
   }
 
-  await sendEmail({ matches, totalScanned: items.length });
+  await sendEmail({ matches: freshMatches, totalScanned: items.length });
   console.log('Email sent.');
+
+  const updatedState = buildUpdatedState(notifiedState, freshMatches, now);
+  const prunedState = pruneState(updatedState, now);
+  saveNotifiedState(NOTIFIED_STATE_PATH, prunedState);
 })().catch((err) => {
   console.error(err);
   process.exit(1);
