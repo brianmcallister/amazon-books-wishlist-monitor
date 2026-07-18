@@ -61,6 +61,10 @@ function pruneState(state, now) {
   return pruned;
 }
 
+function formatSuppressionSummary({ totalMatches, suppressedCount, freshCount, threshold }) {
+  return `${totalMatches} item(s) under $${threshold}. ${suppressedCount} already notified within 14 days, suppressed. ${freshCount} fresh match(es).`;
+}
+
 module.exports = {
   SUPPRESSION_WINDOW_DAYS,
   SUPPRESSION_WINDOW_MS,
@@ -71,4 +75,5 @@ module.exports = {
   partitionMatches,
   buildUpdatedState,
   pruneState,
+  formatSuppressionSummary,
 };

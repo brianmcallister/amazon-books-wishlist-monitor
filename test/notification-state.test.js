@@ -11,6 +11,7 @@ const {
   partitionMatches,
   buildUpdatedState,
   pruneState,
+  formatSuppressionSummary,
 } = require('../notification-state');
 
 test('extractAsin extracts the 10-character ASIN from a /dp/ URL', () => {
@@ -115,4 +116,9 @@ test('pruneState removes entries older than 14 days and keeps recent ones', () =
   const pruned = pruneState(state, now);
 
   assert.deepEqual(pruned, { RECENT000A: state.RECENT000A });
+});
+
+test('formatSuppressionSummary formats the exact required summary line', () => {
+  const line = formatSuppressionSummary({ totalMatches: 3, suppressedCount: 1, freshCount: 2, threshold: 5 });
+  assert.equal(line, '3 item(s) under $5. 1 already notified within 14 days, suppressed. 2 fresh match(es).');
 });
