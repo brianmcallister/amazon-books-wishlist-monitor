@@ -11,6 +11,23 @@ This repo's own commit history is five rounds of bugs that only ever showed up w
 
 **The one principle everything below follows from: scrutiny scales with risk, not with pipeline position.** A pure-logic change (e.g. the notification-dedup work in issue #1 — pure JSON/date-math, no network) should move through this pipeline fast and cheap: cheap models, no live checks, minimal review overhead. A change touching the scraping/DOM/SMTP code called out in `CLAUDE.md` should get independent plan review, a live spot-check, and a stronger model — every time, without exception. This shows up in three separate places below (which stages get invoked, which model runs them, whether a live Amazon call is authorized) — it's one rule applied three times, not three different rules.
 
+## Where brainstorming ends and this pipeline begins
+
+**Brainstorming — turning a rough idea into a well-specified issue — is not part of this pipeline. It's synchronous, interactive work that happens before the pipeline is ever triggered**, the same way issues #1 through #3 in this repo were written: a human working with Claude Code in conversation, refining a rough idea through questions until it's specific enough to hand off. Everything from here on — Analyzer through Deployer — assumes that work is already done and runs unattended, via GitHub Actions, starting from an issue number. The Analyzer's job is to *confirm* the issue is complete, not to *make* it complete; if it isn't, the pipeline stops and asks, it doesn't try to brainstorm on its own.
+
+## Where this builds on [Superpowers](https://github.com/obra/superpowers) instead of reinventing it
+
+[obra/superpowers](https://github.com/obra/superpowers) is a cross-platform, installable Claude Code skills plugin implementing a similar-in-spirit chain — brainstorming → git worktrees → planning → subagent-per-task development with two-stage review → TDD → code review → branch finishing. Two independent designs landing on the same shape is a good sign the shape is right, and there's no reason to hand-roll what it already does well:
+
+- **Planning** should use Superpowers' plan-writing skill for the actual task-breakdown mechanics (bite-sized tasks, exact file paths, verification steps), rather than us maintaining a competing format. Our own addition on top — the coverage checklist mapping every plan item back to the source issue's acceptance criteria — stays ours, because it's specific to this pipeline being issue-driven, which a general planning skill has no way to know about.
+- **TDD execution** should invoke Superpowers' TDD skill directly for RED-GREEN-REFACTOR, rather than `implementer.md` re-explaining the same philosophy in different words.
+- **Implementation moves from one Implementer-per-feature to a fresh subagent per task**, matching Superpowers' pattern, with a two-stage review (spec compliance, then code quality) after each task before the next one starts — see "The Implementer," below. This is a real improvement over the single-pass Implementer this doc originally described, not just a naming change.
+- **Branch finishing gets a real choice**, not an assumed default: merge (not available yet — see the auto-merge non-goal), open a PR, keep the branch without a PR, or discard — see "Deployer," below.
+
+**What stays ours, deliberately, because it's either specific to this project or Superpowers' README doesn't cover it at all:** the risk-scaled *conditional* invocation of stages (Superpowers' gates read as uniform, always-on; ours skip stages entirely for low-stakes work), model and cost tuning per stage (no mention of this in Superpowers), the single-live-external-API-hit-per-run constraint (specific to this project's actual Amazon-throttling history), the GitHub-Actions-native unattended trigger/resume mechanics below (Superpowers reads as built for a human answering questions in real time, not a red/green Actions run resumed via issue comments hours later), and the PR Risk Analyzer's shadow-mode auto-merge track record.
+
+**No separate whole-diff code-review stage was added, on purpose.** It might look like a gap next to Superpowers' dedicated code-review step, but the two-stage per-task review (below) already covers code quality at the point where it's cheapest to fix, Plan Validator already covers plan-level soundness before any code exists, and PR Risk Analyzer already does a final holistic pass for merge-risk purposes. A fourth review layer on top of those three would be redundant, not additive.
+
 ## Risk classification (the thing everything else branches on)
 
 Before any other stage runs, the Analyzer classifies the task as one of:
@@ -64,7 +81,7 @@ Tool-list restriction on the subagents reduces the *surface* for a stage to reac
 | Analyzer | `.claude/agents/analyzer.md` | Haiku 4.5 (Orchestrator overrides to Sonnet 5 for anything that might be scraping-touching) | No |
 | Planner | `.claude/agents/planner.md` | Sonnet 5 | No |
 | Plan Validator | `.claude/agents/plan-validator.md` | Sonnet 5 | No — only invoked when the Analyzer classified the task scraping-touching |
-| Implementer | `.claude/agents/implementer.md` | Sonnet 5 | No |
+| Implementer | `.claude/agents/implementer.md` | Sonnet 5 | No — dispatched fresh, once per task in the plan, not once for the whole feature |
 | Tester | `.claude/agents/tester.md` | Sonnet 5 | Decides *whether* a live check is warranted; does not perform it itself — see the approval-gated job above |
 | PR Risk Analyzer | `.claude/agents/pr-risk-analyzer.md` | Haiku 4.5 | No |
 | Deployer | `.claude/agents/deployer.md` | Sonnet 5 | No — opens/updates the PR, does not merge |
@@ -78,7 +95,7 @@ Haiku is deliberately used only for the two stages we designed to be *mechanical
 Different failure modes get different responses — treating them all the same either under-reacts (silently plowing through a real problem) or over-reacts (building retry infrastructure for things that already have a retry mechanism underneath them).
 
 1. **Infra-level crash** (API error, runner blip, timeout) — no custom logic. The Anthropic SDK already retries transient errors automatically, and above that, re-running the same workflow with the same issue number (see "Fresh start vs. resume" above) picks up exactly where it left off via git. No separate retry system needed.
-2. **A stage can self-correct within its own scope** (the Tester finding and fixing an obvious bug in the Implementer's code is the existing example) — bounded to **one attempt**, then stop. A stage that keeps trying increasingly speculative fixes across many iterations is a real cost and correctness risk inside a single run; if the first fix doesn't hold, that's a signal to surface, not to keep guessing at.
+2. **A stage can self-correct within its own scope** (the Tester finding and fixing an obvious bug is one example; a per-task Implementer subagent addressing its own two-stage review findings is another) — bounded to **one attempt**, then stop. Scoping this to a single task rather than the whole feature is one of the benefits of the fresh-subagent-per-task model — a stage that keeps trying increasingly speculative fixes across many iterations is a real cost and correctness risk inside a single run, and a smaller unit of work makes "did the one fix actually hold" a much easier question to answer cleanly. If the fix doesn't hold, that's a signal to surface, not to keep guessing at.
 3. **A downstream stage rejects an upstream stage's work in a way it can't fix itself** (Plan Validator rejects the plan outright; Tester finds something fundamentally broken, not a one-line fix) — **does not auto-loop back to re-run the earlier stage.** This is deliberate: a downstream stage disagreeing with an upstream one is itself a risk signal, and this harness is built around escalating risk signals to a human rather than having agents resolve disagreements among themselves. The job stops with a comment explaining the disagreement; a human decides how to proceed (re-run with guidance, fix the branch by hand, or restart from an earlier stage).
 4. **The live-check job itself fails** (the triggered `check-wishlist.yml` run errors out, or comes back with a result that doesn't resolve the question the Tester needed answered) — this is a terminal result to report, not a reason to trigger the live check again. "At most once" means once even when that one attempt comes back bad.
 5. **A stage needs human clarification** (the Analyzer's core job) — stops rather than guessing, with the specific gap in both its `.agents/analysis.md` commit and the issue comment.
@@ -99,7 +116,7 @@ Every stage-agent commits its own work to the shared feature branch, with a subs
 - Analyzer commits `.agents/analysis.md` (scope confirmation, risk classification, any caveats found).
 - Planner commits `.agents/plan.md` (the seams it's introducing, the test table, an explicit checklist mapping each issue acceptance criterion to a test case — see "The Planner" below).
 - Plan Validator (when invoked) commits `.agents/plan-validation.md`.
-- Implementer commits actual code + tests, ideally as separate red/green/refactor commits — the commit history *is* the TDD record, which is the reason to do this in git rather than a scratch file.
+- Each per-task Implementer subagent commits its own code + tests as separate red/green/refactor commits — the commit history *is* the TDD record, which is the reason to do this in git rather than a scratch file. Across a multi-task plan, the branch ends up with one red/green/refactor cluster per task, in order, which is itself a readable trace of how the feature was actually built.
 - Tester commits any fixes it had to make.
 - PR Risk Analyzer doesn't commit to the branch — see its own section below for where its output goes.
 
@@ -113,15 +130,25 @@ Every stage-agent commits its own work to the shared feature branch, with a subs
 
 ## The Planner (TDD, specifically)
 
-The Planner's job is not "write tests then implement" — that's too vague for a downstream agent with no back-and-forth to execute deterministically. Its actual deliverable, `.agents/plan.md`, has three required parts in order:
+The Planner's job is not "write tests then implement" — that's too vague for a downstream agent with no back-and-forth to execute deterministically. It uses Superpowers' plan-writing skill for the actual task breakdown — bite-sized tasks (a few minutes of work each), exact file paths, verification steps — rather than us maintaining a competing format for something a general-purpose skill already does well. On top of that mechanic, its deliverable `.agents/plan.md` has two things that are specific to this pipeline being issue-driven, which a general skill has no way to know to include:
 
-1. **Seams.** Which pure functions get extracted, with signatures, before any test is written. You cannot TDD logic that's inlined into an anonymous IIFE with nothing to call independently — naming the seams is what makes the rest of the plan executable.
-2. **Test table.** For each seam, concrete input → expected output pairs, including boundary cases (an entry exactly at a time threshold, malformed input, an empty collection) — not vague descriptions of what should be tested.
-3. **Coverage checklist.** Every acceptance criterion in the source issue mapped to at least one test case in the table above, plus an explicit list of what the plan does *not* touch, checked against the issue's stated non-goals. This is the Planner's own self-check, required on every plan regardless of risk level (see Plan Validator below for when a second, independent check also happens).
+1. **Seams.** Which pure functions get extracted, with signatures, before any test is written — named explicitly enough that each task in the breakdown can be handed to a fresh subagent with no further context from the Planner.
+2. **Coverage checklist.** Every acceptance criterion in the source issue mapped to at least one task/test in the breakdown above, plus an explicit list of what the plan does *not* touch, checked against the issue's stated non-goals. This is the Planner's own self-check, required on every plan regardless of risk level (see Plan Validator below for when a second, independent check also happens).
 
 ## Plan Validator
 
-Only invoked when the Analyzer classified the task as scraping-touching. The case for a *separate* agent here rather than folding this into the Planner's own self-check is objectivity: the same reasoning that produced a flawed plan is often blind to that exact flaw on a re-read, which is why code review is a different person rather than the same author reading their own diff again. Running this on every trivial change would be flat overhead with little payoff, since most of what it checks (does every acceptance criterion map to a test case, does the plan stay inside the issue's non-goals) is a mechanical cross-reference — so it's gated to the one class of task where this project's actual bug history says the stakes are highest.
+Only invoked when the Analyzer classified the task as scraping-touching. The case for a *separate* agent here rather than folding this into the Planner's own self-check is objectivity: the same reasoning that produced a flawed plan is often blind to that exact flaw on a re-read, which is why code review is a different person rather than the same author reading their own diff again. Running this on every trivial change would be flat overhead with little payoff, since most of what it checks (does every acceptance criterion map to a task, does the plan stay inside the issue's non-goals) is a mechanical cross-reference — so it's gated to the one class of task where this project's actual bug history says the stakes are highest.
+
+## The Implementer (fresh subagent per task)
+
+The Orchestrator dispatches a **new Implementer subagent for each task** in the Planner's breakdown — not one subagent working through the whole plan. Each one:
+
+1. Gets just its one task, plus the plan and analysis files for context.
+2. Implements it using Superpowers' TDD skill: failing test, minimal code, passing test, commit — as separate commits, per the git-handoff section above.
+3. Is reviewed **two ways before the next task's subagent is dispatched**: spec compliance (does this task actually do what the plan said) and code quality (using Superpowers' code-review skill, or this environment's `/code-review` skill). A critical finding from either blocks moving to the next task.
+4. Gets **one bounded self-fix attempt** against review findings, per the failure-handling rule above — not an open-ended back-and-forth with the reviewer.
+
+This is a meaningfully more thorough process than a single Implementer working through an entire multi-task plan in one pass — each increment is verified before the next one is built on top of it, and a review finding is caught (and cheap to fix) at the size of one task rather than surfacing later as a tangle across the whole diff. It costs more invocations than the single-pass model this doc originally described, which is a reasonable trade for scraping-touching work specifically; for small pure-logic plans with only one or two tasks, the practical difference from a single-pass Implementer is minor.
 
 ## PR Risk Analyzer
 
@@ -145,9 +172,14 @@ Two output artifacts, both reusing patterns already established in this repo rat
 
 ## Deployer
 
-Composes the PR description — synthesized from `.agents/*.md` and the individual stage commit messages, not a dump of their raw content — then does the pre-squash `.agents/` cleanup described above. **Opens or updates the PR and stops.** A human clicks merge.
+Composes the PR description — synthesized from `.agents/*.md` and the individual stage commit messages, not a dump of their raw content — then does the pre-squash `.agents/` cleanup described above. Rather than always defaulting to "open a PR," it picks from the same real choice Superpowers' branch-finishing step offers:
 
-This is a "for now," not a permanent stance: the project's author is generally open to real auto-merge once the PR Risk Analyzer's track record (from `.github/pr-risk-log.jsonl`) earns that trust. Until then, the actual enforcement mechanism should be **GitHub branch protection requiring human review before merge** — not merely "the Deployer wasn't given a merge tool." Tool-list omission is a convention easily defeated by a Bash-equipped agent finding another way to call the GitHub API; branch protection is enforced by GitHub itself regardless of what any step tries. Wiring up that branch protection is tracked in issue #2, alongside the CI workflow it depends on.
+- **Open (or update) a PR** — the default outcome for anything the PR Risk Analyzer didn't flag as needing a human look first.
+- **Keep the branch, no PR yet** — for a run where the pipeline completed but isn't confident enough to ask for review (e.g. the PR Risk Analyzer's determination was HIGH RISK and the Deployer judges a raw PR description isn't enough context for a good review) — the branch and its full `.agents/*.md` trail (pre-cleanup, in this case — no PR means no squash yet, so there's nothing to lose by leaving them) sit there for a human to look at directly.
+- **Discard** — if something upstream made clear the whole task should be abandoned, rather than leaving a stale branch around indefinitely.
+- **Merge is not an available choice right now** — see the non-goals below. This is a "for now," not a permanent stance: the project's author is generally open to real auto-merge once the PR Risk Analyzer's track record (from `.github/pr-risk-log.jsonl`) earns that trust.
+
+**Opens/updates/keeps/discards, and stops.** A human clicks merge. Until real auto-merge is trusted, the actual enforcement mechanism should be **GitHub branch protection requiring human review before merge** — not merely "the Deployer wasn't given a merge tool." Tool-list omission is a convention easily defeated by a Bash-equipped agent finding another way to call the GitHub API; branch protection is enforced by GitHub itself regardless of what any step tries. Wiring up that branch protection is tracked in issue #2, alongside the CI workflow it depends on.
 
 ## Cost levers beyond model choice
 
@@ -162,7 +194,8 @@ This is a "for now," not a permanent stance: the project's author is generally o
 - No recursive delegation — subagents in this pipeline don't spawn further subagents; only the Orchestrator (the top-level session) calls `Agent`.
 - No trigger mechanism beyond the Actions-tab `workflow_dispatch` form — no issue labels, no `issue_comment` webhook workflow. One button, one field, every time.
 
-## Open questions (tracked in a follow-up issue, not resolved here)
+## Open questions (tracked in follow-up issues, not resolved here)
 
-- Exact `.github/workflows/agent-pipeline.yml` YAML, including the precise Claude Code Action invocation syntax for each stage and the two-job (main + approval-gated live-check) structure described above — the design here is settled, the implementation is not yet written.
-- Exact CI wiring for the required `npm test` status check — blocked on issue #1 landing first, since there's no test suite or `npm test` script in this repo yet (tracked in issue #2).
+- Exact `.github/workflows/agent-pipeline.yml` YAML, including the precise Claude Code Action invocation syntax for each stage and the two-job (main + approval-gated live-check) structure described above — the design here is settled, the implementation is not yet written (issue #3).
+- Exact CI wiring for the required `npm test` status check — blocked on issue #1 landing first, since there's no test suite or `npm test` script in this repo yet (issue #2).
+- How the Superpowers plugin actually gets installed for this repo so its skills are available both interactively and to the Claude Code invocations running inside `agent-pipeline.yml` — needs verifying against Superpowers' own install instructions rather than guessing at plugin-manifest syntax (issue #4).
