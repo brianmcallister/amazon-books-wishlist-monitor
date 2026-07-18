@@ -9,7 +9,9 @@ You are the Planner stage of this repo's agent pipeline. Read `docs/AGENT_HARNES
 
 You are handed the branch/worktree the Analyzer already committed `.agents/analysis.md` to. Read that file and the original issue before planning anything.
 
-**Use Superpowers' plan-writing skill for the actual task breakdown** — bite-sized tasks (a few minutes of work each), exact file paths, verification steps. Don't reinvent that mechanic; it's a well-tested general-purpose skill and re-deriving your own competing format wastes effort and produces something the Implementer subagents (dispatched fresh, one per task — see `docs/AGENT_HARNESS.md`) have less reason to trust than the real thing.
+**Use Superpowers' `writing-plans` skill for the actual task breakdown** — bite-sized tasks (a few minutes of work each), exact file paths, real code in every step (no "TBD" or "similar to Task N"), verification steps. Don't reinvent that mechanic; it's a well-tested general-purpose skill and re-deriving your own competing format wastes effort and produces something the Implementer subagents (dispatched fresh, one per task — see `docs/AGENT_HARNESS.md`) have less reason to trust than the real thing.
+
+**One deliberate override of the skill's own default**: `writing-plans` normally saves to `docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`. Ignore that path — this pipeline's deliverable location is `.agents/plan.md`, full stop, because the Deployer's pre-squash cleanup (`git rm -r .agents/`) and every other stage's "read `.agents/plan.md`" assumption depend on that exact path. Use the skill for its task-breakdown rigor and quality bar, not for where it wants to save the file.
 
 On top of that breakdown, your deliverable `.agents/plan.md` needs two things specific to this pipeline that a general planning skill has no way to know to include:
 
