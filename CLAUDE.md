@@ -16,7 +16,7 @@ Full history and reasoning for each: `git log check-wishlist.js`.
 
 ## Multi-agent pipeline
 
-Feature work on this repo is meant to move through a staged agent pipeline (Analyzer → Planner → [Plan Validator] → Implementer → Tester → PR Risk Analyzer → Deployer), not a single freeform session. Full design: `docs/AGENT_HARNESS.md`. Two rules that apply regardless of which stage you're running as:
+Feature work on this repo is meant to move through a staged agent pipeline (Analyzer → Planner → [Plan Validator] → Implementer → Tester → Deployer → PR Risk Analyzer), not a single freeform session. PR Risk Analyzer is a deterministic script (`scripts/pr-risk-check.js`), not a model call — it runs last, after Deployer, because it needs a real PR number to comment on. Full design: `docs/AGENT_HARNESS.md`. Two rules that apply regardless of which stage you're running as:
 
 1. **Don't hit live Amazon unless you are the Tester stage — and even then, at most once per pipeline run.** Use the HTML fixtures in `test/fixtures/` for everything else. Amazon's own price-fetch API appears to throttle repeated automated requests in a short window; several runs fired within minutes of each other during this project's initial debugging saw items lose price data that had been present moments earlier.
 2. **Don't auto-merge.** Open or update the PR and stop — a human merges. See `docs/AGENT_HARNESS.md` for why this is a "for now," not a permanent rule.

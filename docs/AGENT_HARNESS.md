@@ -13,7 +13,7 @@ This repo's own commit history is five rounds of bugs that only ever showed up w
 
 ## Where brainstorming ends and this pipeline begins
 
-**Brainstorming — turning a rough idea into a well-specified issue — is not part of this pipeline. It's synchronous, interactive work that happens before the pipeline is ever triggered**, the same way issues #1 through #3 in this repo were written: a human working with Claude Code in conversation, refining a rough idea through questions until it's specific enough to hand off. Everything from here on — Analyzer through Deployer — assumes that work is already done and runs unattended, via GitHub Actions, starting from an issue number. The Analyzer's job is to *confirm* the issue is complete, not to *make* it complete; if it isn't, the pipeline stops and asks, it doesn't try to brainstorm on its own.
+**Brainstorming — turning a rough idea into a well-specified issue — is not part of this pipeline. It's synchronous, interactive work that happens before the pipeline is ever triggered**, the same way issues #1 through #3 in this repo were written: a human working with Claude Code in conversation, refining a rough idea through questions until it's specific enough to hand off. Everything from here on — Analyzer through the final PR Risk Analyzer script run — assumes that work is already done and runs unattended, via GitHub Actions, starting from an issue number. The Analyzer's job is to *confirm* the issue is complete, not to *make* it complete; if it isn't, the pipeline stops and asks, it doesn't try to brainstorm on its own.
 
 ## Where this builds on [Superpowers](https://github.com/obra/superpowers) instead of reinventing it
 
@@ -73,10 +73,10 @@ Every run starts identically: you fill in `issue_number` and click Run. What hap
 
 Everything above runs in one job, which means the usual "give this stage a narrower token" trick isn't available — GitHub Actions job/step permission scoping needs a job boundary, and there mostly isn't one here. For most of the pipeline that's an acceptable trade (see "A caveat worth being honest about," below). For live Amazon specifically it isn't, so it gets its own real mechanism instead of a prompt-level rule: a second job.
 
-- **If the Tester decides no live check is warranted** — the common case, since most work on this repo is pure-logic — the main job just continues in the same session, through PR Risk Analyzer and Deployer, to a real PR. There's no hard boundary on that path, so there's no reason to stop and wait for a human to manually continue something that doesn't need approval. (An earlier version of this design stopped the main job after Tester unconditionally and left PR Risk Analyzer/Deployer stranded with no job that would ever run them on this path — caught on the first real run to actually reach this point, fixed the same day.)
+- **If the Tester decides no live check is warranted** — the common case, since most work on this repo is pure-logic — the main job just continues in the same session, through Deployer and then the PR Risk Analyzer script, to a real PR. There's no hard boundary on that path, so there's no reason to stop and wait for a human to manually continue something that doesn't need approval. (An earlier version of this design stopped the main job after Tester unconditionally and left these final stages stranded with no job that would ever run them on this path — caught on the first real run to actually reach this point, fixed the same day.)
 - **If the Tester decides a live check IS genuinely warranted** — per the risk classification and the fixture corpus being insufficient — it says so (a job output) and the main job stops right there, without touching live Amazon itself.
 - A second job, gated with `environment: live-amazon-check` (a GitHub Environment configured with required reviewers), only runs `if:` that output says a live check is needed. GitHub itself pauses this job and shows a "Review deployments" approval prompt — a real, GitHub-enforced checkpoint, not a convention — before anything in it executes.
-- Once approved, that job triggers `check-wishlist.yml` via `workflow_dispatch`, waits for it, and pulls the resulting `wishlist-debug.html` into `test/fixtures/` as a new fixture regardless of pass/fail — then continues the remaining stages (PR Risk Analyzer, Deployer) itself. It can do this cleanly because it checks out the same branch, which already has everything the earlier stages committed — the same git-based resumability that lets a human resume from the Actions tab is what lets this second job pick up mid-pipeline automatically once approved.
+- Once approved, that job triggers `check-wishlist.yml` via `workflow_dispatch`, waits for it, and pulls the resulting `wishlist-debug.html` into `test/fixtures/` as a new fixture regardless of pass/fail — then continues the remaining stages (Deployer, then the PR Risk Analyzer script) itself. It can do this cleanly because it checks out the same branch, which already has everything the earlier stages committed — the same git-based resumability that lets a human resume from the Actions tab is what lets this second job pick up mid-pipeline automatically once approved.
 - This still respects "at most once per pipeline run": the Tester only sets that output once, and only when it's actually warranted, not as a default.
 
 ### A caveat worth being honest about
@@ -104,10 +104,10 @@ The second real run against issue #1 hit this directly: Task 8 of its plan neede
 | Plan Validator | `.claude/agents/plan-validator.md` | Sonnet 5 | No — only invoked when the Analyzer classified the task scraping-touching |
 | Implementer | `.claude/agents/implementer.md` | Sonnet 5 | No — dispatched fresh, once per task in the plan, not once for the whole feature |
 | Tester | `.claude/agents/tester.md` | Sonnet 5 | Decides *whether* a live check is warranted; does not perform it itself — see the approval-gated job above |
-| PR Risk Analyzer | `.claude/agents/pr-risk-analyzer.md` | Haiku 4.5, `effort: low` | No |
 | Deployer | `.claude/agents/deployer.md` | Sonnet 5 | No — opens/updates the PR, does not merge |
+| PR Risk Analyzer | `scripts/pr-risk-check.js` — not a subagent, no model call at all | N/A | No |
 
-Haiku is deliberately used only for the two stages we designed to be *mechanical* rather than open-ended judgment (confirming a well-specified issue is complete; applying a fixed rubric) — the model choice is a consequence of that design decision, not a separate cost optimization layered on top. Planner, Implementer, and Tester never downgrade below Sonnet 5: a cheap model on the Planner in particular tends to cost more overall, since a bad plan poisons every stage that reads it.
+Haiku is deliberately used only for the one remaining stage we designed to be *mechanical* rather than open-ended judgment: confirming a well-specified issue is complete. PR Risk Analyzer used to be Haiku's other mechanical-rubric stage, but "mechanical" turned out to mean "actually deterministic" once looked at closely — see its own section below for why that became a plain script instead of a model call at any tier. Planner, Implementer, and Tester never downgrade below Sonnet 5: a cheap model on the Planner in particular tends to cost more overall, since a bad plan poisons every stage that reads it.
 
 **Model overrides happen at the call site, not in the subagent file.** The `Agent` tool's `model` parameter overrides a subagent's frontmatter default for one call — so the Orchestrator, having just seen the Analyzer's risk classification, decides per-invocation whether a stage needs to run hotter than its default.
 
@@ -142,7 +142,8 @@ Every stage-agent commits its own work to the shared feature branch, with a subs
 - Plan Validator (when invoked) commits `.agents/plan-validation.md`.
 - Each per-task Implementer subagent commits its own code + tests as separate red/green/refactor commits — the commit history *is* the TDD record, which is the reason to do this in git rather than a scratch file. Across a multi-task plan, the branch ends up with one red/green/refactor cluster per task, in order, which is itself a readable trace of how the feature was actually built.
 - Tester commits any fixes it had to make.
-- PR Risk Analyzer doesn't commit to the branch — see its own section below for where its output goes.
+- Deployer commits the pre-squash `.agents/` cleanup, then opens/updates the PR.
+- PR Risk Analyzer (`scripts/pr-risk-check.js`, run after Deployer since it needs a real PR number) commits its append to `.github/pr-risk-log.jsonl` itself and pushes directly — it's a script invoked via Bash, not a subagent, so there's no `Agent`-tool dispatch step for it, just the Orchestrator running it and confirming the push landed.
 
 **Why git and not a shared context or a state file:** this is the same "no database, commit files" idiom the project already uses for `notified.json` (see issue #1), applied one level up to pipeline coordination instead of app runtime state. It gives a fresh session — one with zero memory of this conversation, picking up hours or days later, resuming after a crash, or resuming automatically inside the approval-gated live-check job — a durable, inspectable record: `git log --stat` on the branch shows exactly which stages have completed and what each one found, with no separate state file that could drift out of sync with reality.
 
@@ -176,42 +177,50 @@ This is a meaningfully more thorough process than a single Implementer working t
 
 **`implementer.md` deliberately does not tell the subagent to read this document.** A cost pass after the first real run against issue #1 found this doc had grown to ~11K tokens — close to the entire measured cache-write cost of a fresh Implementer dispatch's first turn — and most of it (Orchestrator-level resume logic, other stages' own sections, cost levers, observability) has no bearing on implementing one task. Every operational rule an Implementer actually needs (TDD flow, push/commit-title discipline, review expectations, the live-network and workflow-file restrictions) is inlined directly in `implementer.md` itself instead. This matters more here than for any other stage because the Implementer is the one dispatched repeatedly — up to once per task in the plan — so an unnecessary doc-read is a cost paid many times per run, not once. The other stage files still point at this doc because they're each dispatched at most once per run, where the same waste doesn't compound.
 
-## PR Risk Analyzer
-
-Runs after the Tester, before the Deployer. **Determines and logs a risk level. Does not act on it — no auto-merge, no label-based merge trigger, nothing that touches merge state.** This is intentionally a dry run: the goal is to build a track record (how often would the low-risk calls have actually held up, with no follow-up fixes needed) before ever considering flipping on real auto-merge for real.
-
-The determination is a fixed rubric, not a subjective call — that's what makes Haiku sufficient for this stage:
-
-**HIGH RISK if any of:**
-- Touches the load-bearing scraping/SMTP code called out in `CLAUDE.md`
-- Touches workflow YAML permissions, secrets, or the state-file commit/push step
-- Adds or changes a dependency
-- Diff is large (>100 lines or >3 files)
-- No test coverage for what changed, or — for scraping-touching changes specifically — no fixture added/updated
-
-**LOW RISK requires all of:** pure-logic change only, small focused diff, adequate test coverage, all required checks green, no dependency/permission/secret changes.
-
-Two output artifacts, both reusing patterns already established in this repo rather than inventing new infrastructure:
-
-1. A **PR comment** stating the risk level and which rubric items fired — human-visible immediately, so a reviewer can sanity-check the call before merging.
-2. An append to **`.github/pr-risk-log.jsonl`** (one line per PR: `{pr, sha, risk, reasons, checks_passed, timestamp}`) — same "commit a small file back to the repo" idiom as `notified.json`. This is the evidence base for eventually deciding auto-merge is trustworthy. The file exists (currently empty, ready to append to) as of issue #2.
-
 ## Deployer
 
-Composes the PR description — synthesized from `.agents/*.md` and the individual stage commit messages, not a dump of their raw content — then does the pre-squash `.agents/` cleanup described above. Rather than always defaulting to "open a PR," it picks from the same real choice Superpowers' branch-finishing step offers:
+Runs after the Tester, before the PR Risk Analyzer script. Composes the PR description — synthesized from `.agents/*.md` and the individual stage commit messages, not a dump of their raw content — then does the pre-squash `.agents/` cleanup described above. Rather than always defaulting to "open a PR," it picks from the same real choice Superpowers' branch-finishing step offers:
 
 **The PR description includes a `Closes #N` line for the issue this run was dispatched for**, so merging the PR auto-closes the issue — no separate manual close step, no issue silently sitting open after its PR lands. This only applies when the run's diff actually closes out the issue's full scope; a partial pass (see issue #2's own history, split across two PRs by design) uses plain issue-referencing text instead of the auto-close keyword, since auto-closing an issue that still has real remaining scope would be actively misleading.
 
-- **Open (or update) a PR** — the default outcome for anything the PR Risk Analyzer didn't flag as needing a human look first.
-- **Keep the branch, no PR yet** — for a run where the pipeline completed but isn't confident enough to ask for review (e.g. the PR Risk Analyzer's determination was HIGH RISK and the Deployer judges a raw PR description isn't enough context for a good review) — the branch and its full `.agents/*.md` trail (pre-cleanup, in this case — no PR means no squash yet, so there's nothing to lose by leaving them) sit there for a human to look at directly.
+**The PR description does not include a risk-assessment section.** That used to be possible because PR Risk Analyzer ran before the Deployer; now it runs after (see below — it needs a real PR number to comment on), so there's nothing for the Deployer to read or synthesize at this point. The description says plainly that a risk determination follows as a separate PR comment once the PR exists, rather than guessing at one.
+
+- **Open (or update) a PR** — the default outcome for most runs; the risk script's determination lands as a follow-up comment on whatever PR this step opens or updates.
+- **Keep the branch, no PR yet** — for a run where the pipeline completed but the Deployer isn't confident enough to ask for review — the branch and its full `.agents/*.md` trail (pre-cleanup, in this case — no PR means no squash yet, so there's nothing to lose by leaving them) sit there for a human to look at directly. (No PR also means no PR Risk Analyzer run — it needs a PR number, so this path skips that stage entirely.)
 - **Discard** — if something upstream made clear the whole task should be abandoned, rather than leaving a stale branch around indefinitely.
 - **Merge is not an available choice right now** — see the non-goals below. This is a "for now," not a permanent stance: the project's author is generally open to real auto-merge once the PR Risk Analyzer's track record (from `.github/pr-risk-log.jsonl`) earns that trust.
 
-**Opens/updates/keeps/discards, and stops.** A human clicks merge. Until real auto-merge is trusted, the actual enforcement mechanism should be **GitHub branch protection requiring human review before merge** — not merely "the Deployer wasn't given a merge tool." Tool-list omission is a convention easily defeated by a Bash-equipped agent finding another way to call the GitHub API; branch protection is enforced by GitHub itself regardless of what any step tries. Wiring up that branch protection is tracked in issue #2, alongside the CI workflow it depends on.
+**Opens/updates/keeps/discards, reports the PR number, and stops.** A human clicks merge. Until real auto-merge is trusted, the actual enforcement mechanism should be **GitHub branch protection requiring human review before merge** — not merely "the Deployer wasn't given a merge tool." Tool-list omission is a convention easily defeated by a Bash-equipped agent finding another way to call the GitHub API; branch protection is enforced by GitHub itself regardless of what any step tries. Wiring up that branch protection is tracked in issue #2, alongside the CI workflow it depends on.
+
+## PR Risk Analyzer
+
+Runs after the Deployer, using the PR number it reported. **Determines and logs a risk level. Does not act on it — no auto-merge, no label-based merge trigger, nothing that touches merge state.** This is intentionally a dry run: the goal is to build a track record (how often would the low-risk calls have actually held up, with no follow-up fixes needed) before ever considering flipping on real auto-merge for real.
+
+### Why this is a script, not a subagent
+
+This stage used to be a Haiku subagent (`effort: low`) applying a "fixed rubric, not a subjective call" — the doc said as much even at the time. Looked at honestly, "fixed rubric evaluated against `git diff` output" isn't a lighter-weight judgment call, it's not a judgment call at all: every input (file list, line counts, hunk line-ranges, dependency/workflow-file touches, presence of a `test/` path in the diff) is something `git diff` already produces as plain, parseable text, and every rule below is a deterministic condition over that text. A model call here was paying for probabilistic text generation to do a job regular code does exactly and reproducibly, for free, every time. `scripts/pr-risk-check.js` is the deterministic replacement: same rubric, same two output artifacts, zero model cost, and — unlike a model call — the exact same diff always produces the exact same determination. This is a genuinely different class of change from the effort/model-tier tuning described in "Cost levers" below (which still assumes a model call happens); this stage doesn't make one at all.
+
+The determination is the same fixed rubric as before, just evaluated in code instead of prompted:
+
+**HIGH RISK if any of:**
+- Touches the load-bearing scraping/SMTP code called out in `CLAUDE.md` (checked via hunk-header line ranges in `check-wishlist.js`'s diff against the hardcoded load-bearing line bounds in the script — update those constants if the file's structure changes)
+- Touches workflow YAML permissions, secrets, or the state-file commit/push step (any `.github/workflows/*` path in the diff)
+- Adds or changes a dependency (`package.json` in the diff)
+- Diff is large (>100 lines or >3 files)
+- No test coverage for what changed (no `test/` path in the diff)
+
+**LOW RISK requires all of:** pure-logic change only, small focused diff, adequate test coverage, all required checks green, no dependency/permission/secret changes — i.e. none of the above rules fire.
+
+Two output artifacts, both reusing patterns already established in this repo rather than inventing new infrastructure:
+
+1. A **PR comment** (via `gh pr comment`) stating the risk level and which rubric items fired — human-visible immediately, so a reviewer can sanity-check the call before merging.
+2. An append to **`.github/pr-risk-log.jsonl`** (one line per PR: `{pr, sha, risk, reasons, checks_passed, timestamp}`) — same "commit a small file back to the repo" idiom as `notified.json`. This is the evidence base for eventually deciding auto-merge is trustworthy. The script commits and pushes this itself. The file exists (currently empty, ready to append to) as of issue #2.
+
+Invoked by the Orchestrator via Bash, not the `Agent` tool: `node scripts/pr-risk-check.js <issue-number> <pr-number>`, using the PR number Deployer just reported.
 
 ## Cost levers beyond model choice
 
-- **`effort` parameter** — same model, tunable reasoning depth, set via the `effort:` subagent frontmatter field (overrides the session's inherited level for that subagent only). Wired in for the Analyzer and PR Risk Analyzer specifically (`effort: low`) — the same two stages already on Haiku because their work is mechanical rubric-application rather than open-ended judgment; the model choice and the effort choice are two expressions of the same underlying reasoning, not independent levers. Deliberately *not* set on Planner, Plan Validator, Implementer, Tester, or Deployer — those stages' whole value is thoroughness, and cutting effort there is exactly the wrong place to save money.
+- **`effort` parameter** — same model, tunable reasoning depth, set via the `effort:` subagent frontmatter field (overrides the session's inherited level for that subagent only). Wired in for the Analyzer specifically (`effort: low`) — it's on Haiku because its work is mechanical rubric-application rather than open-ended judgment; the model choice and the effort choice are two expressions of the same underlying reasoning, not independent levers. PR Risk Analyzer used to be the other stage in this bucket, but its rubric-application turned out to be fully deterministic rather than merely mechanical — see its own section above — so it's a plain script with no `effort` parameter to set at all now, the cheapest tier there is. Deliberately *not* set on Planner, Plan Validator, Implementer, Tester, or Deployer — those stages' whole value is thoroughness, and cutting effort there is exactly the wrong place to save money.
 - **Prompt caching — real, but only partially reliable across a multi-task run.** Measured directly (dispatching two fresh Implementer subagents locally, reading the raw API `usage` data): a second Implementer dispatch in the same session *did* get a real cache hit on the large shared system-prompt content, rather than paying full price again. But `claude-code-action` uses the standard 5-minute ephemeral cache tier (confirmed from real production logs — not the 1-hour tier, which isn't exposed as a configurable option at the `claude_args` level anyway, and wouldn't clearly be worth it even if it were: 1-hour cache writes cost 2x base input versus 1.25x for 5-minute, with zero benefit for anything that lands within 5 minutes anyway). A real Implementer task can easily take several minutes on its own, so later tasks in an 8-task run aren't guaranteed to land inside that window — don't assume this saves money on every dispatch, only when they happen to land close together in time.
 
 ## Observability

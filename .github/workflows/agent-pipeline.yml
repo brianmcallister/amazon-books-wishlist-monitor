@@ -78,21 +78,25 @@ jobs:
             `.claude/agents/implementer.md` per task in the Planner's
             breakdown, not one dispatch for the whole plan), Tester -- then,
             **only if the Tester determines a live Amazon check is NOT
-            warranted, continue in this same job/session** to PR Risk
-            Analyzer and Deployer, dispatching each stage's subagent via the
-            `Agent` tool per "Pipeline stages" in the doc. Follow "Failure
-            handling" in the doc for what to do when a stage can't proceed
-            cleanly.
+            warranted, continue in this same job/session** to Deployer, then
+            the PR Risk Analyzer script. Dispatch Deployer via the `Agent`
+            tool per "Pipeline stages" in the doc; once it reports the PR
+            number it opened or updated, run
+            `node scripts/pr-risk-check.js ${{ inputs.issue_number }}
+            <pr-number>` via Bash -- this is a deterministic script, not a
+            subagent dispatch, so there's nothing to invoke through the
+            `Agent` tool for this stage. Follow "Failure handling" in the
+            doc for what to do when a stage can't proceed cleanly.
 
-            The only reason to stop *before* PR Risk Analyzer/Deployer is if
-            the Tester determines a live check IS warranted -- that's the
-            one hard boundary in this pipeline, and it belongs to a second,
-            approval-gated job, never to you. Everything else (pure-logic
-            tasks, or scraping-touching tasks where fixtures already proved
-            sufficient) has no such boundary and should run end-to-end to a
-            real PR in one job, not stop partway and wait for a human to
-            manually continue something that doesn't actually need human
-            approval.
+            The only reason to stop *before* Deployer/the PR Risk Analyzer
+            script is if the Tester determines a live check IS warranted --
+            that's the one hard boundary in this pipeline, and it belongs to
+            a second, approval-gated job, never to you. Everything else
+            (pure-logic tasks, or scraping-touching tasks where fixtures
+            already proved sufficient) has no such boundary and should run
+            end-to-end to a real PR in one job, not stop partway and wait
+            for a human to manually continue something that doesn't
+            actually need human approval.
 
             Log your progress to this job's own output as you go, so someone
             watching the Actions log (not just reading a summary afterward)
@@ -110,16 +114,19 @@ jobs:
             subagent's job -- yours, since you're the one who knows when
             each stage actually finished) immediately after every single
             stage's commit(s) land, including after each individual
-            Implementer task dispatch and after PR Risk Analyzer's/
-            Deployer's, not just at the end. This job runs on an ephemeral
-            runner -- anything committed but not pushed before the job ends
-            is permanently lost the moment the runner is torn down, no
-            matter how completely you describe it in a checkpoint comment
-            afterward.
+            Implementer task dispatch and after Deployer's commit. (The PR
+            Risk Analyzer script pushes its own commit itself -- it's not a
+            subagent, so there's no separate push step for you to run after
+            it, just confirm it succeeded.) Do this at every stage, not just
+            at the end. This job runs on an ephemeral runner -- anything
+            committed but not pushed before the job ends is permanently
+            lost the moment the runner is torn down, no matter how
+            completely you describe it in a checkpoint comment afterward.
 
             Before your turn ends for ANY reason -- normal completion after
-            Deployer, stopping after Tester because a live check is
-            warranted, a Failure Handling stop, anything -- confirm with
+            the PR Risk Analyzer script, stopping after Tester because a
+            live check is warranted, a Failure Handling stop, anything --
+            confirm with
             `git status` and `git log origin/<branch>..HEAD` (or equivalent)
             that there is nothing committed locally that isn't already on
             the remote branch. If there is, push it before you stop. A
@@ -137,16 +144,17 @@ jobs:
             happened and what's needed, then stop.
 
             **If the Tester determines a live check IS warranted**, stop
-            right there -- do not attempt PR Risk Analyzer or Deployer
-            yourself. Report your structured output and end; the second job
-            picks up PR Risk Analyzer and Deployer after the live check
-            completes and is approved.
+            right there -- do not attempt Deployer or the PR Risk Analyzer
+            script yourself. Report your structured output and end; the
+            second job picks up Deployer and then the PR Risk Analyzer
+            script after the live check completes and is approved.
 
             **If the Tester determines a live check is NOT warranted**,
-            continue in this same session to PR Risk Analyzer then Deployer.
-            That's this job's normal successful ending: a PR opened or
-            updated (or Deployer's keep/discard choice, per the doc), with
-            everything pushed and a final comment/PR description in place.
+            continue in this same session to Deployer, then the PR Risk
+            Analyzer script. That's this job's normal successful ending: a
+            PR opened or updated (or Deployer's keep/discard choice, per
+            the doc) with its risk determination posted as a PR comment,
+            everything pushed, and a final comment/PR description in place.
 
             Report structured output at the end: the branch name you
             resolved/created, whether a live Amazon check is warranted per
@@ -282,12 +290,15 @@ jobs:
             Read CLAUDE.md and docs/AGENT_HARNESS.md, then read
             `.agents/*.md` and recent commit history on this branch to
             understand what the pipeline already did. The Tester stage is
-            done. Continue with the remaining stages: PR Risk Analyzer, then
-            Deployer, dispatching each via the `Agent` tool per "Pipeline
-            stages" in the doc. Follow "Failure handling" in the doc if
-            either stage can't proceed cleanly -- post a comment on the
-            issue (or the PR, if Deployer has opened one) explaining what
-            happened, then stop.
+            done. Continue with the remaining stages: Deployer first,
+            dispatched via the `Agent` tool per "Pipeline stages" in the
+            doc; once it reports the PR number it opened or updated, run
+            `node scripts/pr-risk-check.js ${{ inputs.issue_number }}
+            <pr-number>` via Bash -- that's a deterministic script, not a
+            subagent, so there's no `Agent` tool dispatch for it. Follow
+            "Failure handling" in the doc if either stage can't proceed
+            cleanly -- post a comment on the issue (or the PR, if Deployer
+            has opened one) explaining what happened, then stop.
 
             Include the issue number (${{ inputs.issue_number }}) in every
             subagent dispatch prompt, same as the earlier job -- each
@@ -301,11 +312,12 @@ jobs:
             Actions log reads as a sequential, timestamped trace.
 
             CRITICAL, non-negotiable, same as every other stage in this
-            pipeline: `git push` yourself immediately after every commit,
-            including the PR Risk Analyzer's. This job runs on an ephemeral
+            pipeline: `git push` yourself immediately after Deployer's
+            commit(s) -- don't wait until everything is done. (The PR Risk
+            Analyzer script pushes its own commit itself once you run it;
+            just confirm it succeeded.) This job runs on an ephemeral
             runner -- anything committed but not pushed before it ends is
-            gone. Don't rely on Deployer's own push at the very end to cover
-            PR Risk Analyzer's commit too; push after each one separately.
+            gone.
 
             You do not have live network access to Amazon and must not add
             any -- the one live check for this run already happened.
