@@ -1,4 +1,5 @@
-require('dns').setDefaultResultOrder('ipv4first');
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
 
 const fs = require('fs');
 const puppeteer = require('puppeteer');
@@ -140,11 +141,32 @@ async function scrapeWishlist(url) {
 }
 
 async function sendEmail({ matches, totalScanned }) {
+  const smtpHost = process.env.SMTP_HOST;
+
+  // nodemailer resolves both A and AAAA records for the SMTP host and picks a RANDOM
+  // address from the combined list to connect to -- it does not use Node's
+  // dns.setDefaultResultOrder, so half the time it dials an IPv6 address, which
+  // GitHub Actions runners often can't route (ENETUNREACH). Pre-resolve to a
+  // specific IPv4 address ourselves and connect to that literal IP instead; nodemailer
+  // skips its own DNS resolution entirely when given an IP. servername is set
+  // explicitly so TLS/SNI still validates against the real hostname.
+  let connectHost = smtpHost;
+  let tlsOptions;
+  try {
+    const { address } = await dns.promises.lookup(smtpHost, { family: 4 });
+    connectHost = address;
+    tlsOptions = { servername: smtpHost };
+    console.log(`Resolved ${smtpHost} to IPv4 ${address} for the SMTP connection.`);
+  } catch (err) {
+    console.log(`Could not resolve an IPv4 address for ${smtpHost} (${err.message}); connecting by hostname.`);
+  }
+
   const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
+    host: connectHost,
     port: Number(process.env.SMTP_PORT || 587),
     secure: process.env.SMTP_SECURE === 'true',
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    tls: tlsOptions,
   });
 
   const to = process.env.EMAIL_TO || 'brian@brianmcallister.com';
