@@ -168,7 +168,7 @@ The determination is a fixed rubric, not a subjective call — that's what makes
 Two output artifacts, both reusing patterns already established in this repo rather than inventing new infrastructure:
 
 1. A **PR comment** stating the risk level and which rubric items fired — human-visible immediately, so a reviewer can sanity-check the call before merging.
-2. An append to **`.github/pr-risk-log.jsonl`** (one line per PR: `{pr, sha, risk, reasons, checks_passed, timestamp}`) — same "commit a small file back to the repo" idiom as `notified.json`. This is the evidence base for eventually deciding auto-merge is trustworthy.
+2. An append to **`.github/pr-risk-log.jsonl`** (one line per PR: `{pr, sha, risk, reasons, checks_passed, timestamp}`) — same "commit a small file back to the repo" idiom as `notified.json`. This is the evidence base for eventually deciding auto-merge is trustworthy. The file exists (currently empty, ready to append to) as of issue #2.
 
 ## Deployer
 
