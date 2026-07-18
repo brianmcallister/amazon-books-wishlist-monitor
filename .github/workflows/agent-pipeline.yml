@@ -94,14 +94,16 @@ jobs:
             per the Tester's determination.
           claude_args: |
             --model claude-sonnet-5
+            --permission-mode bypassPermissions
             --json-schema '{"type":"object","properties":{"branch":{"type":"string"},"live_check_warranted":{"type":"boolean"},"summary":{"type":"string"}},"required":["branch","live_check_warranted","summary"]}'
 
       - name: Extract structured output
         id: extract
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
         run: |
-          OUTPUT='${{ steps.run-claude.outputs.structured_output }}'
-          echo "branch=$(echo "$OUTPUT" | jq -r '.branch')" >> "$GITHUB_OUTPUT"
-          echo "live_check_warranted=$(echo "$OUTPUT" | jq -r '.live_check_warranted')" >> "$GITHUB_OUTPUT"
+          echo "branch=$(echo "$STRUCTURED_OUTPUT" | jq -r '.branch')" >> "$GITHUB_OUTPUT"
+          echo "live_check_warranted=$(echo "$STRUCTURED_OUTPUT" | jq -r '.live_check_warranted')" >> "$GITHUB_OUTPUT"
 
   live-amazon-check:
     needs: orchestrator
@@ -123,10 +125,12 @@ jobs:
       - name: Trigger check-wishlist.yml and wait for it
         id: trigger-live-check
         uses: actions/github-script@v7
+        env:
+          PIPELINE_BRANCH: ${{ needs.orchestrator.outputs.branch }}
         with:
           script: |
             const { owner, repo } = context.repo;
-            const branch = '${{ needs.orchestrator.outputs.branch }}';
+            const branch = process.env.PIPELINE_BRANCH;
             const dispatchedAt = Date.now();
 
             await github.rest.actions.createWorkflowDispatch({
@@ -214,3 +218,4 @@ jobs:
             any -- the one live check for this run already happened.
           claude_args: |
             --model claude-sonnet-5
+            --permission-mode bypassPermissions

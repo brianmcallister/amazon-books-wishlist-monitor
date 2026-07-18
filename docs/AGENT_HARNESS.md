@@ -82,6 +82,8 @@ Everything above runs in one job, which means the usual "give this stage a narro
 
 Tool-list restriction on the subagents reduces the *surface* for a stage to reach live Amazon or attempt a merge, but a Bash-equipped agent can technically still run arbitrary commands within its own job — tool omission is not a hard sandbox. The two genuinely hard guarantees in this design are the environment-gated approval above (for live Amazon) and GitHub branch protection requiring human review before merge (for Deployer, below). Everything else here is a strong convention plus PR-level review, not a technical impossibility. Don't oversell this to yourself when extending the harness — say so explicitly if a future addition is a convention rather than an enforced boundary.
 
+This is also why both `claude-code-action` invocations in `agent-pipeline.yml` run with `--permission-mode bypassPermissions`: the alternative, Claude Code's normal interactive permission-approval prompt, has no human to answer it in an unattended Actions job — the first real run against issue #1 confirmed this the hard way, dead-ending on "This command requires approval" for `gh`, `WebFetch`, `git ls-remote`, and even dispatching the Analyzer subagent, without ever reaching a stage that does real work. Bypassing that prompt at the top-level Orchestrator session is what makes unattended execution possible at all; it does not bypass each dispatched subagent's own `tools:` frontmatter restriction (a fresh Tester dispatch still literally isn't given a live-network tool, regardless of the Orchestrator's own permission mode) — that restriction and the two hard guarantees above remain the actual backstops.
+
 ## Pipeline stages
 
 | Stage | Subagent file | Default model | Live Amazon? |
