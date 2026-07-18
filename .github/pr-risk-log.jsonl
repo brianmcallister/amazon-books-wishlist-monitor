@@ -1,0 +1,1 @@
+{"pr": 9, "sha": "7cf7eab5bb1528dafd8ceb466a530d79e7cbdd58", "risk": "high", "reasons": ["Touches workflow YAML permissions (contents: write) and state-file commit/push step", "Diff is large (246 lines, 4 files - exceeds >100 lines and >3 files threshold)"], "checks_passed": true, "timestamp": "2026-07-18T19:03:02Z"}
