@@ -1,0 +1,14 @@
+{
+  "name": "amazon-books-wishlist-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Daily check of an Amazon wish list for books under a price threshold, emailed as a digest.",
+  "main": "check-wishlist.js",
+  "scripts": {
+    "check": "node check-wishlist.js"
+  },
+  "dependencies": {
+    "nodemailer": "^9.0.3",
+    "puppeteer": "^23.5.0"
+  }
+}

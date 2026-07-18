@@ -1,0 +1,33 @@
+name: Check Amazon Wishlist
+
+on:
+  schedule:
+    - cron: '0 13 * * *' # ~9am ET
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install headless Chrome system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2t64 || true
+
+      - run: npm ci
+
+      - run: node check-wishlist.js
+        env:
+          WISHLIST_URL: ${{ vars.WISHLIST_URL }}
+          PRICE_THRESHOLD: ${{ vars.PRICE_THRESHOLD }}
+          EMAIL_TO: ${{ vars.EMAIL_TO }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
