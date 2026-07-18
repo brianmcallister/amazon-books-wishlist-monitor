@@ -1,3 +1,4 @@
+const fs = require('fs');
 const puppeteer = require('puppeteer');
 const nodemailer = require('nodemailer');
 
@@ -37,6 +38,8 @@ async function scrapeWishlist(url) {
 
     const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
     console.log(`HTTP status: ${response.status()}`);
+    console.log(`Final URL: ${page.url()}`);
+    console.log(`Page title: ${await page.title()}`);
 
     await page.evaluate(async () => {
       await new Promise((resolve) => {
@@ -52,6 +55,21 @@ async function scrapeWishlist(url) {
       });
     });
     await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 300));
+    if (/robot|captcha|automated access|unusual traffic|api-services-support/i.test(bodyText)) {
+      console.log('WARNING: page body looks like a bot-check/CAPTCHA page, not the wishlist.');
+      console.log(`Body text preview: ${bodyText.replace(/\s+/g, ' ').trim()}`);
+    }
+
+    const containerCount = await page.evaluate(() => document.querySelectorAll('[id^="item_"]').length);
+    console.log(`Container elements matched ([id^="item_"]): ${containerCount}`);
+
+    if (process.env.SAVE_DEBUG_ARTIFACTS === 'true') {
+      await page.screenshot({ path: 'wishlist-debug.png', fullPage: true });
+      fs.writeFileSync('wishlist-debug.html', await page.content());
+      console.log('Saved wishlist-debug.png and wishlist-debug.html');
+    }
 
     const items = await page.evaluate(() => {
       const results = [];
@@ -74,6 +92,7 @@ async function scrapeWishlist(url) {
     return items.map((item) => ({
       title: item.title,
       price: parsePrice(item.priceText),
+      priceText: item.priceText,
       url: resolveUrl(item.href),
     }));
   } finally {
@@ -112,6 +131,10 @@ async function sendEmail({ matches, totalScanned }) {
 (async () => {
   const items = await scrapeWishlist(WISHLIST_URL);
   console.log(`Scanned ${items.length} items.`);
+
+  items.forEach((i) => {
+    console.log(`  - "${i.title.slice(0, 70)}" raw="${i.priceText}" parsed=${i.price}`);
+  });
 
   const priced = items.filter((i) => i.price !== null).sort((a, b) => a.price - b.price);
   const skipped = items.length - priced.length;
