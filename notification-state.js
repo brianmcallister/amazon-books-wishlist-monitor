@@ -21,10 +21,33 @@ function saveNotifiedState(filePath, state) {
   fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
+function isSuppressed(notifiedAtIso, now) {
+  const notifiedAt = new Date(notifiedAtIso).getTime();
+  if (Number.isNaN(notifiedAt)) return false;
+  return now.getTime() - notifiedAt < SUPPRESSION_WINDOW_MS;
+}
+
+function partitionMatches(matches, state, now) {
+  const freshMatches = [];
+  const suppressedMatches = [];
+  for (const match of matches) {
+    const asin = extractAsin(match.url);
+    const notifiedAt = state[asin];
+    if (notifiedAt && isSuppressed(notifiedAt, now)) {
+      suppressedMatches.push(match);
+    } else {
+      freshMatches.push(match);
+    }
+  }
+  return { freshMatches, suppressedMatches };
+}
+
 module.exports = {
   SUPPRESSION_WINDOW_DAYS,
   SUPPRESSION_WINDOW_MS,
   extractAsin,
   loadNotifiedState,
   saveNotifiedState,
+  isSuppressed,
+  partitionMatches,
 };

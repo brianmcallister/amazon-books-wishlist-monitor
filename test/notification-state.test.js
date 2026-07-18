@@ -3,7 +3,13 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { extractAsin, loadNotifiedState, saveNotifiedState } = require('../notification-state');
+const {
+  extractAsin,
+  loadNotifiedState,
+  saveNotifiedState,
+  isSuppressed,
+  partitionMatches,
+} = require('../notification-state');
 
 test('extractAsin extracts the 10-character ASIN from a /dp/ URL', () => {
   const url = 'https://www.amazon.com/Some-Book-Title/dp/B003P9VZLQ/ref=something';
@@ -41,4 +47,43 @@ test('saveNotifiedState writes state that loadNotifiedState can read back', () =
   const state = { B003P9VZLQ: '2026-07-01T00:00:00.000Z' };
   saveNotifiedState(filePath, state);
   assert.deepEqual(loadNotifiedState(filePath), state);
+});
+
+test('isSuppressed returns true for a notification less than 14 days old', () => {
+  const now = new Date('2026-07-18T00:00:00.000Z');
+  const notifiedAt = new Date(now.getTime() - (14 * 24 * 60 * 60 * 1000 - 1)).toISOString();
+  assert.equal(isSuppressed(notifiedAt, now), true);
+});
+
+test('isSuppressed returns false for a notification exactly 14 days old (boundary is fresh)', () => {
+  const now = new Date('2026-07-18T00:00:00.000Z');
+  const notifiedAt = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString();
+  assert.equal(isSuppressed(notifiedAt, now), false);
+});
+
+test('isSuppressed returns false for a notification older than 14 days', () => {
+  const now = new Date('2026-07-18T00:00:00.000Z');
+  const notifiedAt = new Date(now.getTime() - 20 * 24 * 60 * 60 * 1000).toISOString();
+  assert.equal(isSuppressed(notifiedAt, now), false);
+});
+
+test('partitionMatches splits matches into fresh and suppressed using the 14-day window', () => {
+  const now = new Date('2026-07-18T00:00:00.000Z');
+  const recentlyNotifiedUrl = 'https://www.amazon.com/dp/B003P9VZLQ/ref=x';
+  const longAgoNotifiedUrl = 'https://www.amazon.com/dp/B0011111AA/ref=x';
+  const neverNotifiedUrl = 'https://www.amazon.com/dp/B0022222BB/ref=x';
+  const state = {
+    B003P9VZLQ: new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString(), // 1 day ago
+    B0011111AA: new Date(now.getTime() - 20 * 24 * 60 * 60 * 1000).toISOString(), // 20 days ago
+  };
+  const matches = [
+    { title: 'Recently notified', url: recentlyNotifiedUrl },
+    { title: 'Notified long ago', url: longAgoNotifiedUrl },
+    { title: 'Never notified', url: neverNotifiedUrl },
+  ];
+
+  const { freshMatches, suppressedMatches } = partitionMatches(matches, state, now);
+
+  assert.deepEqual(freshMatches.map((m) => m.url), [longAgoNotifiedUrl, neverNotifiedUrl]);
+  assert.deepEqual(suppressedMatches.map((m) => m.url), [recentlyNotifiedUrl]);
 });
