@@ -20,9 +20,44 @@ Before any other stage runs, the Analyzer classifies the task as one of:
 
 This classification gates: whether the Plan Validator runs at all, whether the Tester is authorized to spend its one live Amazon check, and whether the PR Risk Analyzer's rubric can even consider the change low-risk (scraping-touching changes are never low-risk, regardless of test coverage — see the rubric below).
 
-## Pipeline stages
+## How this actually runs
 
-The **Orchestrator** is not a subagent — it's the top-level Claude Code session itself, invoked by whatever triggers a pipeline run (a labeled issue, a scheduled Routine, a manual dispatch). It reads the target issue, creates a branch and worktree (`issue-<number>-<slug>`), and spawns the stages below in sequence via the `Agent` tool, handing each one the branch/worktree location plus enough context to work cold — it does not hand-carry findings between stages itself; that's what the git branch is for (see below).
+**One workflow file, `.github/workflows/agent-pipeline.yml`, triggered exclusively via the Actions tab's "Run workflow" button — `workflow_dispatch` with a single input, `issue_number`.** No label triggers, no `issue_comment` triggers, no second workflow watching for anything. Both starting a fresh pipeline run and resuming one that stopped go through the exact same form, with the exact same one field.
+
+- `run-name: "Pipeline: issue #${{ inputs.issue_number }}"` so parallel runs for different issues are distinguishable at a glance in the Actions list, rather than a generic name you have to click into to identify.
+- `concurrency: { group: pipeline-${{ inputs.issue_number }} }` so accidentally clicking Run twice on the same issue queues the second attempt instead of two runs racing on the same branch.
+
+**One job runs one Claude Code invocation, which acts as the Orchestrator** — it is not itself a subagent file, it's the top-level session for that run, and it uses the `Agent` tool in-process to invoke each stage subagent (`.claude/agents/*.md`) in sequence. This is the piece that replaced two earlier, more complex designs (a single multi-job DAG file with per-job permission scoping, then seven independently-triggerable workflow files) — both gave up real usability (parallel-run visibility, a single obvious "restart" action) for boundary guarantees this project's actual risk profile doesn't need. The one place a hard, GitHub-enforced boundary still matters — the live Amazon check — gets one, described below, without paying that cost everywhere else.
+
+### Fresh start vs. resume — decided by the Orchestrator, not by you
+
+Every run starts identically: you fill in `issue_number` and click Run. What happens next depends on repo state, not on anything you chose in the form:
+
+1. Resolve the branch name from the issue number (`issue-<N>-...`).
+2. **Branch doesn't exist** → fresh start. Create it from `main`, begin at the Analyzer stage.
+3. **Branch exists** → resume. Check out the branch and read two things:
+   - Which `.agents/*.md` files are already committed, which tells the Orchestrator which stages already finished.
+   - The issue's comment thread: find the most recent comment *it* posted (always carrying a recognizable marker so it can find its own last checkpoint), then read anything posted after that as this run's guidance.
+4. If there's no new comment since its last checkpoint, there's nothing to fold in — it just retries whatever stage stopped, plain, no correction. If you did reply, that reply is the correction for this run.
+
+**This is the entire input mechanism.** There's no separate "guidance" field on the dispatch form — guidance lives in the issue thread. The Actions button is the "go" signal; the comment thread is the "how" signal. When something stops the pipeline (a stage needs clarification, a downstream stage rejects an upstream one, the live-check approval is pending), the Orchestrator posts a comment on the issue (or the PR, once Deployer has opened one) explaining what happened and what it needs — then the job ends. You reply on that thread, go back to the Actions tab, run the same workflow with the same issue number. Repeat until it completes.
+
+**Whether the job is green or red is the signal for whether it needs you.** Full completion (PR opened, or an update pushed to an existing one) is success. Stopping early for *any* reason — needs clarification, a stage rejected another stage's work, waiting on the live-check approval below — is a failed run. Red in the Actions tab always means "go read the issue," never "something is silently fine."
+
+### The one hard boundary: live Amazon requires human approval, enforced by GitHub
+
+Everything above runs in one job, which means the usual "give this stage a narrower token" trick isn't available — GitHub Actions job/step permission scoping needs a job boundary, and there mostly isn't one here. For most of the pipeline that's an acceptable trade (see "A caveat worth being honest about," below). For live Amazon specifically it isn't, so it gets its own real mechanism instead of a prompt-level rule: a second job.
+
+- The main job runs the Orchestrator through the Tester stage. If the Tester decides — per the risk classification and the fixture corpus being insufficient — that a live check is genuinely warranted, it says so (a job output) and stops, without touching live Amazon itself.
+- A second job, gated with `environment: live-amazon-check` (a GitHub Environment configured with required reviewers), only runs `if:` that output says a live check is needed. GitHub itself pauses this job and shows a "Review deployments" approval prompt — a real, GitHub-enforced checkpoint, not a convention — before anything in it executes.
+- Once approved, that job triggers `check-wishlist.yml` via `workflow_dispatch`, waits for it, and pulls the resulting `wishlist-debug.html` into `test/fixtures/` as a new fixture regardless of pass/fail — then continues the remaining stages (PR Risk Analyzer, Deployer) itself. It can do this cleanly because it checks out the same branch, which already has everything the earlier stages committed — the same git-based resumability that lets a human resume from the Actions tab is what lets this second job pick up mid-pipeline automatically once approved.
+- This still respects "at most once per pipeline run": the Tester only sets that output once, and only when it's actually warranted, not as a default.
+
+### A caveat worth being honest about
+
+Tool-list restriction on the subagents reduces the *surface* for a stage to reach live Amazon or attempt a merge, but a Bash-equipped agent can technically still run arbitrary commands within its own job — tool omission is not a hard sandbox. The two genuinely hard guarantees in this design are the environment-gated approval above (for live Amazon) and GitHub branch protection requiring human review before merge (for Deployer, below). Everything else here is a strong convention plus PR-level review, not a technical impossibility. Don't oversell this to yourself when extending the harness — say so explicitly if a future addition is a convention rather than an enforced boundary.
+
+## Pipeline stages
 
 | Stage | Subagent file | Default model | Live Amazon? |
 |---|---|---|---|
@@ -30,7 +65,7 @@ The **Orchestrator** is not a subagent — it's the top-level Claude Code sessio
 | Planner | `.claude/agents/planner.md` | Sonnet 5 | No |
 | Plan Validator | `.claude/agents/plan-validator.md` | Sonnet 5 | No — only invoked when the Analyzer classified the task scraping-touching |
 | Implementer | `.claude/agents/implementer.md` | Sonnet 5 | No |
-| Tester | `.claude/agents/tester.md` | Sonnet 5 | **At most once**, only when the task is scraping-touching and fixtures alone weren't conclusive |
+| Tester | `.claude/agents/tester.md` | Sonnet 5 | Decides *whether* a live check is warranted; does not perform it itself — see the approval-gated job above |
 | PR Risk Analyzer | `.claude/agents/pr-risk-analyzer.md` | Haiku 4.5 | No |
 | Deployer | `.claude/agents/deployer.md` | Sonnet 5 | No — opens/updates the PR, does not merge |
 
@@ -38,7 +73,15 @@ Haiku is deliberately used only for the two stages we designed to be *mechanical
 
 **Model overrides happen at the call site, not in the subagent file.** The `Agent` tool's `model` parameter overrides a subagent's frontmatter default for one call — so the Orchestrator, having just seen the Analyzer's risk classification, decides per-invocation whether a stage needs to run hotter than its default.
 
-**A caveat worth being honest about:** tool-list restriction (below) reduces the *surface* for a stage to reach live Amazon or trigger a merge, but a Bash-equipped agent can technically still run arbitrary commands — tool omission is not a hard sandbox. The one genuinely hard guarantee in this design is GitHub branch protection requiring human review before merge (see Deployer, below); everything else here is a strong convention plus PR-level review, not a technical impossibility. Don't oversell this to yourself when extending the harness — say so explicitly if a future addition is a convention rather than an enforced boundary.
+## Failure handling
+
+Different failure modes get different responses — treating them all the same either under-reacts (silently plowing through a real problem) or over-reacts (building retry infrastructure for things that already have a retry mechanism underneath them).
+
+1. **Infra-level crash** (API error, runner blip, timeout) — no custom logic. The Anthropic SDK already retries transient errors automatically, and above that, re-running the same workflow with the same issue number (see "Fresh start vs. resume" above) picks up exactly where it left off via git. No separate retry system needed.
+2. **A stage can self-correct within its own scope** (the Tester finding and fixing an obvious bug in the Implementer's code is the existing example) — bounded to **one attempt**, then stop. A stage that keeps trying increasingly speculative fixes across many iterations is a real cost and correctness risk inside a single run; if the first fix doesn't hold, that's a signal to surface, not to keep guessing at.
+3. **A downstream stage rejects an upstream stage's work in a way it can't fix itself** (Plan Validator rejects the plan outright; Tester finds something fundamentally broken, not a one-line fix) — **does not auto-loop back to re-run the earlier stage.** This is deliberate: a downstream stage disagreeing with an upstream one is itself a risk signal, and this harness is built around escalating risk signals to a human rather than having agents resolve disagreements among themselves. The job stops with a comment explaining the disagreement; a human decides how to proceed (re-run with guidance, fix the branch by hand, or restart from an earlier stage).
+4. **The live-check job itself fails** (the triggered `check-wishlist.yml` run errors out, or comes back with a result that doesn't resolve the question the Tester needed answered) — this is a terminal result to report, not a reason to trigger the live check again. "At most once" means once even when that one attempt comes back bad.
+5. **A stage needs human clarification** (the Analyzer's core job) — stops rather than guessing, with the specific gap in both its `.agents/analysis.md` commit and the issue comment.
 
 ## Snapshot/fixture testing (how iteration avoids hitting live Amazon)
 
@@ -46,7 +89,7 @@ The workflow's `SAVE_DEBUG_ARTIFACTS=true` step already produces exactly what's 
 
 - **Fixture corpus** lives at `test/fixtures/*.html` (does not exist yet — created as part of the infrastructure work in issue #2). Each fixture is a real `wishlist-debug.html` captured from an actual run, committed with a name describing the scenario it covers (e.g. `partial-price-failure.html` for the "10 items missing price" scenario that motivated the reload-retry logic).
 - **What fixtures can and can't test.** A static snapshot validates parsing/selector logic against a frozen DOM state. It cannot reproduce Amazon's *live* virtualization behavior (a dynamic client-side race, not a DOM state) — that logic is validated by the fact that it exists for a documented, live-diagnosed reason (see `CLAUDE.md`), not by a fixture pretending to simulate it.
-- **Capture-once-replay-forever.** Any time the Tester's one live spot-check produces a new `wishlist-debug.html`, save it as a new fixture regardless of whether the run passed or failed. The corpus should only ever grow; future pipelines need live Amazon less often as a result.
+- **Capture-once-replay-forever.** Any time the approval-gated live check produces a new `wishlist-debug.html`, it's saved as a new fixture regardless of whether the run passed or failed. The corpus should only ever grow; future pipelines need live Amazon less often as a result.
 - **Pure-logic changes need zero fixtures and zero live calls.** The dedup/pruning feature in issue #1 is a good example — it's pure JSON + date-math operating on an already-scraped array, fully unit-testable with `node:test` and no browser at all.
 
 ## Git as the inter-stage handoff mechanism
@@ -54,13 +97,13 @@ The workflow's `SAVE_DEBUG_ARTIFACTS=true` step already produces exactly what's 
 Every stage-agent commits its own work to the shared feature branch, with a substantive commit message — not just code changes, but a record of *why*. Concretely:
 
 - Analyzer commits `.agents/analysis.md` (scope confirmation, risk classification, any caveats found).
-- Planner commits `.agents/plan.md` (the seams it's introducing, the test table, an explicit checklist mapping each issue acceptance criterion to a test case — see "Planner" below).
+- Planner commits `.agents/plan.md` (the seams it's introducing, the test table, an explicit checklist mapping each issue acceptance criterion to a test case — see "The Planner" below).
 - Plan Validator (when invoked) commits `.agents/plan-validation.md`.
 - Implementer commits actual code + tests, ideally as separate red/green/refactor commits — the commit history *is* the TDD record, which is the reason to do this in git rather than a scratch file.
 - Tester commits any fixes it had to make.
 - PR Risk Analyzer doesn't commit to the branch — see its own section below for where its output goes.
 
-**Why git and not a shared context or a state file:** this is the same "no database, commit files" idiom the project already uses for `notified.json` (see issue #1), applied one level up to pipeline coordination instead of app runtime state. It gives a fresh session — one with zero memory of this conversation, picking up hours or days later, or resuming after a crash — a durable, inspectable record: `git log --stat` on the branch shows exactly which stages have completed and what each one found, with no separate state file that could drift out of sync with reality.
+**Why git and not a shared context or a state file:** this is the same "no database, commit files" idiom the project already uses for `notified.json` (see issue #1), applied one level up to pipeline coordination instead of app runtime state. It gives a fresh session — one with zero memory of this conversation, picking up hours or days later, resuming after a crash, or resuming automatically inside the approval-gated live-check job — a durable, inspectable record: `git log --stat` on the branch shows exactly which stages have completed and what each one found, with no separate state file that could drift out of sync with reality.
 
 **Squash-merge only, no other technique.** A GitHub squash merge captures the branch's *final* tree state as one diff against `main` — it discards all intermediate history in the process. So:
 
@@ -117,8 +160,9 @@ This is a "for now," not a permanent stance: the project's author is generally o
 - No database, no external service, no GitHub Actions cache/artifacts for pipeline state — git commits only, per "Git as the inter-stage handoff mechanism" above.
 - No auto-merge until the PR Risk Analyzer has an actual track record to point to.
 - No recursive delegation — subagents in this pipeline don't spawn further subagents; only the Orchestrator (the top-level session) calls `Agent`.
+- No trigger mechanism beyond the Actions-tab `workflow_dispatch` form — no issue labels, no `issue_comment` webhook workflow. One button, one field, every time.
 
-## Open questions (tracked in issue #2, not resolved here)
+## Open questions (tracked in a follow-up issue, not resolved here)
 
-- Whether the pipeline runs as one long Claude Code session with `Agent`-tool subagent calls in-process, or as discrete GitHub Actions jobs/steps each invoking Claude Code fresh — affects how strictly the "only Tester gets live Amazon / GH Actions trigger access" rule can be enforced via token/permission scoping rather than just prompt convention.
-- Exact CI wiring for the required `npm test` status check — blocked on issue #1 landing first, since there's no test suite or `npm test` script in this repo yet.
+- Exact `.github/workflows/agent-pipeline.yml` YAML, including the precise Claude Code Action invocation syntax for each stage and the two-job (main + approval-gated live-check) structure described above — the design here is settled, the implementation is not yet written.
+- Exact CI wiring for the required `npm test` status check — blocked on issue #1 landing first, since there's no test suite or `npm test` script in this repo yet (tracked in issue #2).
