@@ -34,7 +34,7 @@ This repo's own commit history is five rounds of bugs that only ever showed up w
 `obra/superpowers` is itself a self-contained Claude Code plugin — its repo root carries `.claude-plugin/plugin.json` directly (currently pinned at tag `v6.1.1`), not just a skills folder needing a wrapper. That means two different install paths make sense for the two different ways this repo runs Claude Code, and neither is a guess:
 
 - **Interactive/human sessions** (someone with this repo open locally, or an Orchestrator session with no special CLI flags): this repo's `.claude/settings.json` declares Superpowers' marketplace under `extraKnownMarketplaces` (the documented "team marketplaces" mechanism — see Claude Code's plugin docs). Opening this repo in a trusted Claude Code session prompts to install it from there; a human confirms once.
-- **The CI pipeline** (`agent-pipeline.yml`, issue #3): marketplace-based install depends on an interactive trust prompt that doesn't exist in an unattended job. Instead, the Claude Code Action invocation's `claude_args` should include `--plugin-url https://github.com/obra/superpowers/archive/refs/tags/v6.1.1.zip` — a documented flag that fetches and loads a plugin archive for that session only, no marketplace registration or install step required. This also pins the exact version the pipeline runs against, rather than floating on whatever `main` happens to be that day. Bump the tag in that flag deliberately when upgrading, the same way a dependency version bump would be reviewed. (This flag needs to land in `agent-pipeline.yml` itself — tracked as part of issue #3, not a standalone step.)
+- **The CI pipeline** (`agent-pipeline.yml`, issue #3): marketplace-based install depends on an interactive trust prompt that doesn't exist in an unattended job. The Claude Code Action turns out to have first-class inputs for exactly this, so `agent-pipeline.yml` uses those directly rather than a CLI flag threaded through `claude_args`: `plugin_marketplaces: https://github.com/obra/superpowers-marketplace.git` and `plugins: superpowers@superpowers-marketplace` on every `anthropics/claude-code-action@v1` step in that workflow. No marketplace registration step, no trust prompt — the action adds the marketplace and installs the plugin before running Claude, every time, deterministically.
 
 ## Risk classification (the thing everything else branches on)
 
@@ -86,6 +86,7 @@ Tool-list restriction on the subagents reduces the *surface* for a stage to reac
 
 | Stage | Subagent file | Default model | Live Amazon? |
 |---|---|---|---|
+| Orchestrator | not a subagent file — the top-level session `agent-pipeline.yml` invokes directly | Sonnet 5 | No — routes and dispatches only |
 | Analyzer | `.claude/agents/analyzer.md` | Haiku 4.5 (Orchestrator overrides to Sonnet 5 for anything that might be scraping-touching) | No |
 | Planner | `.claude/agents/planner.md` | Sonnet 5 | No |
 | Plan Validator | `.claude/agents/plan-validator.md` | Sonnet 5 | No — only invoked when the Analyzer classified the task scraping-touching |
@@ -204,6 +205,5 @@ Composes the PR description — synthesized from `.agents/*.md` and the individu
 
 ## Open questions (tracked in follow-up issues, not resolved here)
 
-- Exact `.github/workflows/agent-pipeline.yml` YAML, including the precise Claude Code Action invocation syntax for each stage and the two-job (main + approval-gated live-check) structure described above — the design here is settled, the implementation is not yet written (issue #3).
-- Exact CI wiring for the required `npm test` status check — blocked on issue #1 landing first, since there's no test suite or `npm test` script in this repo yet (issue #2).
-- How the Superpowers plugin actually gets installed for this repo so its skills are available both interactively and to the Claude Code invocations running inside `agent-pipeline.yml` — needs verifying against Superpowers' own install instructions rather than guessing at plugin-manifest syntax (issue #4).
+- Exact CI wiring for the required `npm test` status check, plus branch protection requiring it — blocked on issue #1 landing first, since there's no test suite or `npm test` script in this repo yet (issue #2).
+- `.github/workflows/agent-pipeline.yml` (issue #3) and the Superpowers install wiring inside it (issue #4) are both written, grounded in the real, verified `anthropics/claude-code-action@v1` inputs and the real Superpowers plugin structure — but neither has been exercised by an actual run yet. Issue #3's own testing guidance calls for a mechanics-only dry run (a fresh/resume cycle through at least the Analyzer and Planner stages) before trusting it against a real issue, specifically without spending the one live-Amazon-check budget on that dry run. The `live-amazon-check` job also depends on a GitHub Environment named `live-amazon-check` with required reviewers actually being configured in repo Settings — that's a manual step this repo work can't do on its own; flag it rather than assume it's done.
