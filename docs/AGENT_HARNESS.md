@@ -199,6 +199,15 @@ Composes the PR description — synthesized from `.agents/*.md` and the individu
 - **`effort` parameter** — same model, tunable reasoning depth. Cheap stages can also run at `effort: low` even on Sonnet, compounding with model choice.
 - **Prompt caching** — every stage re-reads the same issue text and this doc. Structuring that as a cached prefix (stable content first, volatile content — the specific task — last) cuts repeat-read cost to roughly a tenth of full price across a single pipeline run's six-plus stages.
 
+## Observability
+
+The default `claude-code-action` invocation is nearly silent in the Actions log — "Running Claude Code via SDK (full output hidden for security)" until one final summary line with total cost and turn count. The first two real runs against issue #1 made this a real problem, not a cosmetic one: a run can burn several dollars and end with a checkpoint comment describing eight tasks of work, and the Actions log gives no way to see that happening as it happens or verify it after the fact. Two fixes, both in `agent-pipeline.yml`:
+
+- **`show_full_output: true`** on every `claude-code-action` step, so the raw turn-by-turn stream (including nested `Agent`-tool dispatches) actually lands in the Actions log instead of being suppressed.
+- **Explicit stage-transition logging** — the Orchestrator's prompt requires a timestamped `echo` immediately before and after dispatching each stage subagent (each Implementer task counts as its own stage), so the log reads as a sequential trace of what ran when, not just a post-hoc summary.
+
+**What this doesn't give you: a real per-stage cost breakdown.** The Orchestrator is one continuous Claude session that dispatches subagents in-process via the `Agent` tool (a deliberate choice — see "How this actually runs," above), so `total_cost_usd` is one number for the whole job, not itemized per stage. The timestamped log gives you *timing* per stage, and full raw output lets you reconstruct token usage by hand if you need to, but a clean per-stage dollar figure would require splitting stages into separate `claude-code-action` invocations — a real architecture change, not a logging tweak, and not made here without discussing it first.
+
 ## Explicit non-goals
 
 - No price-drop override or other scope creep on the dedup feature (see issue #1's own non-goals — this harness doesn't relitigate them).
