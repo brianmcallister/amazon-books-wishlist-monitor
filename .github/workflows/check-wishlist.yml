@@ -11,7 +11,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Authenticates as the PAT owner (added to the main ruleset's bypass
+      # list) instead of the default github-actions[bot] token, which the
+      # ruleset can't bypass -- required for the direct push to main below.
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.STATE_COMMIT_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
