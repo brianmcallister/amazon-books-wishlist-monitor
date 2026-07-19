@@ -3,7 +3,7 @@ name: issue-17-analysis
 description: Risk classification and scope confirmation for CHANGELOG.md prototype
 ---
 
-# Analyzer (#17): Pure-logic scope confirmation
+# Analyzer (#17): Re-analysis confirms pure-logic scope and completed work.
 
 ## Issue summary
 
