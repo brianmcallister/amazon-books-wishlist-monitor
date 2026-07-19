@@ -200,6 +200,21 @@ jobs:
             point is a sequential, timestamped trace of the whole run, not
             just a post-hoc summary.
 
+            Every `Agent` tool dispatch returns a `<usage>` block after the
+            subagent finishes (`subagent_tokens`, `tool_uses`,
+            `duration_ms`) -- capture these as you go and build a running
+            per-stage table (one row per stage you actually dispatched,
+            skipping Plan Validator's row if it was skipped). This is a
+            token/tool-use/duration count, not a dollar figure -- you
+            cannot know this run's actual dollar cost from inside your own
+            session, since later stages (including your own remaining
+            turns) still cost money that hasn't been spent yet at any
+            point before your session ends. A separate deterministic step
+            appends the real total cost to the PR after your session
+            completes; your job is just the per-stage table, reported as
+            `stage_usage_markdown` in your structured output (a markdown
+            table, columns Stage | Tokens | Tool calls | Duration).
+
             CRITICAL, non-negotiable: run `git push` yourself (not a
             subagent's job -- yours, since you're the one who knows when
             each stage actually finished) immediately after every single
@@ -244,10 +259,10 @@ jobs:
             description in place.
 
             Report structured output at the end: whether a live Amazon check
-            is warranted per the Tester's determination, and `run_complete`
-            (the branch name isn't part of this -- it's already a job
-            output sourced from the precomputed BRANCH fact above, not from
-            anything you report). Set
+            is warranted per the Tester's determination, `run_complete`,
+            and `stage_usage_markdown` (the branch name isn't part of this
+            -- it's already a job output sourced from the precomputed
+            BRANCH fact above, not from anything you report). Set
             `run_complete: false` if for ANY reason you did not reach a
             genuine, intentional stopping point of your own choosing --
             including if you notice your own turn being cut off,
@@ -265,7 +280,7 @@ jobs:
             --permission-mode bypassPermissions
             --max-turns 250
             --disallowedTools "ScheduleWakeup,mcp__*"
-            --json-schema '{"type":"object","properties":{"live_check_warranted":{"type":"boolean"},"run_complete":{"type":"boolean"},"summary":{"type":"string"}},"required":["live_check_warranted","run_complete","summary"]}'
+            --json-schema '{"type":"object","properties":{"live_check_warranted":{"type":"boolean"},"run_complete":{"type":"boolean"},"stage_usage_markdown":{"type":"string"},"summary":{"type":"string"}},"required":["live_check_warranted","run_complete","stage_usage_markdown","summary"]}'
 
       - name: Extract structured output
         id: extract
@@ -274,6 +289,22 @@ jobs:
         run: |
           echo "live_check_warranted=$(echo "$STRUCTURED_OUTPUT" | jq -r '.live_check_warranted')" >> "$GITHUB_OUTPUT"
           echo "run_complete=$(echo "$STRUCTURED_OUTPUT" | jq -r '.run_complete')" >> "$GITHUB_OUTPUT"
+          echo "stage_usage_markdown<<EOF_STAGE_USAGE" >> "$GITHUB_OUTPUT"
+          echo "$STRUCTURED_OUTPUT" | jq -r '.stage_usage_markdown' >> "$GITHUB_OUTPUT"
+          echo "EOF_STAGE_USAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Append run cost to PR
+        if: steps.extract.outputs.run_complete == 'true' && steps.extract.outputs.live_check_warranted == 'false'
+        env:
+          STAGE_USAGE_MARKDOWN: ${{ steps.extract.outputs.stage_usage_markdown }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(gh pr list --head "${{ steps.resolve.outputs.branch }}" --json number --jq '.[0].number')
+          if [ -n "$PR_NUMBER" ]; then
+            node scripts/append-run-cost.js "$PR_NUMBER" "$RUNNER_TEMP/claude-execution-output.json"
+          else
+            echo "No open PR found for branch ${{ steps.resolve.outputs.branch }} -- Deployer likely chose keep/discard instead of opening one. Skipping cost report."
+          fi
 
   live-amazon-check:
     needs: orchestrator
@@ -408,6 +439,17 @@ jobs:
             <stage name> -- <one-line reason/outcome>"` via Bash, so the
             Actions log reads as a sequential, timestamped trace.
 
+            Capture the `<usage>` block the `Agent` tool returns after
+            Deployer finishes (`subagent_tokens`, `tool_uses`,
+            `duration_ms`) and report it as `stage_usage_markdown` in your
+            structured output -- a one-row markdown table (Stage | Tokens |
+            Tool calls | Duration) for Deployer. This is a token/duration
+            count, not a dollar figure; a separate deterministic step
+            appends the real dollar total for *this job's own session*
+            once you're done (Analyzer through Tester's cost was a
+            separate, earlier session in the first job -- not included in
+            what that step reports here).
+
             CRITICAL, non-negotiable, same as every other stage in this
             pipeline: `git push` yourself immediately after Deployer's
             commit(s) -- don't wait until everything is done. (The PR Risk
@@ -423,3 +465,25 @@ jobs:
             --permission-mode bypassPermissions
             --max-turns 250
             --disallowedTools "ScheduleWakeup,mcp__*"
+            --json-schema '{"type":"object","properties":{"stage_usage_markdown":{"type":"string"},"summary":{"type":"string"}},"required":["stage_usage_markdown","summary"]}'
+
+      - name: Extract structured output
+        id: extract-continue
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.run-claude-continue.outputs.structured_output }}
+        run: |
+          echo "stage_usage_markdown<<EOF_STAGE_USAGE" >> "$GITHUB_OUTPUT"
+          echo "$STRUCTURED_OUTPUT" | jq -r '.stage_usage_markdown' >> "$GITHUB_OUTPUT"
+          echo "EOF_STAGE_USAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Append run cost to PR
+        env:
+          STAGE_USAGE_MARKDOWN: "${{ steps.extract-continue.outputs.stage_usage_markdown }}\n\n_Note: this job resumed after an approved live Amazon check, in a separate session from the one that ran Analyzer through Tester -- this cost figure covers only Deployer and the PR Risk Analyzer script, not the full pipeline run._"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(gh pr list --head "${{ needs.orchestrator.outputs.branch }}" --json number --jq '.[0].number')
+          if [ -n "$PR_NUMBER" ]; then
+            node scripts/append-run-cost.js "$PR_NUMBER" "$RUNNER_TEMP/claude-execution-output.json"
+          else
+            echo "No open PR found for branch ${{ needs.orchestrator.outputs.branch }} -- Deployer likely chose keep/discard instead of opening one. Skipping cost report."
+          fi
