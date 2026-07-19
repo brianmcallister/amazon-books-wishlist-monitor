@@ -69,6 +69,10 @@ function formatSuppressionSummary({ totalMatches, suppressedCount, freshCount, t
   return `${totalMatches} item(s) under $${threshold}. ${suppressedCount} already notified within 14 days, suppressed. ${freshCount} fresh match(es).`;
 }
 
+function formatDryRunMessage(freshCount) {
+  return `[DRY RUN] Would send email for ${freshCount} fresh match(es) -- no email sent, notification state not updated.`;
+}
+
 module.exports = {
   SUPPRESSION_WINDOW_DAYS,
   SUPPRESSION_WINDOW_MS,
@@ -81,4 +85,5 @@ module.exports = {
   pruneState,
   formatSuppressionSummary,
   isDryRun,
+  formatDryRunMessage,
 };
