@@ -11,6 +11,8 @@ const {
   buildUpdatedState,
   pruneState,
   formatSuppressionSummary,
+  isDryRun,
+  formatDryRunMessage,
 } = require('./notification-state');
 
 const DEFAULT_WISHLIST_URL =
@@ -226,6 +228,11 @@ async function sendEmail({ matches, totalScanned }) {
       threshold: PRICE_THRESHOLD,
     })
   );
+
+  if (isDryRun(process.env) && freshMatches.length > 0) {
+    console.log(formatDryRunMessage(freshMatches.length));
+    return;
+  }
 
   if (freshMatches.length === 0) {
     console.log('No email sent (all matches already notified recently).');
