@@ -39,6 +39,31 @@ function formatModelUsage(modelUsage) {
     .join('\n');
 }
 
+// Deployer's PR descriptions carry a fixed `## Trace` heading (see
+// deployer.md) specifically so this section can be inserted right after
+// the trace narrative -- appended at the very end of the body (after
+// "Closes #N") reads like an afterthought disconnected from the rest of
+// the description. Falls back to appending at the end if that heading
+// isn't found (an older or hand-written PR description, say), rather than
+// failing outright.
+function insertAfterTrace(body, section) {
+  const lines = body.split('\n');
+  const traceIdx = lines.findIndex((l) => l.trim() === '## Trace');
+  if (traceIdx === -1) {
+    return `${body}\n\n${section}\n`;
+  }
+  let insertAt = lines.length;
+  for (let i = traceIdx + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) {
+      insertAt = i;
+      break;
+    }
+  }
+  const before = lines.slice(0, insertAt);
+  const after = lines.slice(insertAt);
+  return [...before, '', section, '', ...after].join('\n');
+}
+
 function main() {
   const [prNumber, execPath] = process.argv.slice(2);
   if (!prNumber || !execPath) {
@@ -74,7 +99,7 @@ function main() {
   }
 
   const currentBody = sh('gh', ['pr', 'view', String(prNumber), '--json', 'body', '--jq', '.body']);
-  const newBody = `${currentBody}\n\n${costSection}\n`;
+  const newBody = insertAfterTrace(currentBody, costSection);
 
   const tmpFile = path.join(os.tmpdir(), `pr-${prNumber}-body-with-cost.md`);
   fs.writeFileSync(tmpFile, newBody);
