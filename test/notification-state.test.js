@@ -13,6 +13,7 @@ const {
   pruneState,
   formatSuppressionSummary,
   isDryRun,
+  formatDryRunMessage,
 } = require('../notification-state');
 
 test('extractAsin extracts the 10-character ASIN from a /dp/ URL', () => {
@@ -143,4 +144,20 @@ test('isDryRun returns false when DRY_RUN is an empty string', () => {
 test('isDryRun is case-sensitive: "TRUE" or "True" do not enable dry-run', () => {
   assert.equal(isDryRun({ DRY_RUN: 'TRUE' }), false);
   assert.equal(isDryRun({ DRY_RUN: 'True' }), false);
+});
+
+test('formatDryRunMessage formats the exact required dry-run notice for multiple matches', () => {
+  const line = formatDryRunMessage(3);
+  assert.equal(
+    line,
+    '[DRY RUN] Would send email for 3 fresh match(es) -- no email sent, notification state not updated.'
+  );
+});
+
+test('formatDryRunMessage formats the exact required dry-run notice for a single match', () => {
+  const line = formatDryRunMessage(1);
+  assert.equal(
+    line,
+    '[DRY RUN] Would send email for 1 fresh match(es) -- no email sent, notification state not updated.'
+  );
 });
