@@ -309,6 +309,7 @@ jobs:
     if: |
       always() &&
       needs.planner.result == 'success' &&
+      needs.planner.outputs.tasks != '[]' &&
       (needs.plan-validator.result == 'skipped' || (needs.plan-validator.result == 'success' && needs.plan-validator.outputs.approved == 'true'))
     strategy:
       matrix:
