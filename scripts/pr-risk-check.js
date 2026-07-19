@@ -39,6 +39,22 @@ function shOrEmpty(cmd, args) {
   }
 }
 
+// Only matters when this script runs as its own post-session workflow step
+// (agent-pipeline-v2.yml's Deployer job) rather than being invoked mid-session
+// by an Orchestrator's own Bash tool call (agent-pipeline.yml) -- see
+// scripts/log-stage-cost.js's reauthOrigin() for why: claude-code-action
+// mints its own scoped GitHub App installation token for the Claude
+// session's own git operations, then revokes it as part of its own
+// composite-action cleanup immediately after the session ends, breaking
+// the credential for any later step's own git push.
+function reauthOrigin() {
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!token || !repo) return; // best effort -- let the push surface any real problem
+  const serverUrl = (process.env.GITHUB_SERVER_URL || 'https://github.com').replace('https://', '');
+  sh('git', ['remote', 'set-url', 'origin', `https://x-access-token:${token}@${serverUrl}/${repo}.git`]);
+}
+
 function main() {
   const [issueNumber, prNumber] = process.argv.slice(2);
   if (!issueNumber || !prNumber) {
@@ -147,6 +163,7 @@ function main() {
 
   sh('git', ['config', 'user.name', 'github-actions[bot]']);
   sh('git', ['config', 'user.email', 'github-actions[bot]@users.noreply.github.com']);
+  reauthOrigin();
   sh('git', ['add', '.github/pr-risk-log.jsonl']);
   sh('git', [
     'commit',
