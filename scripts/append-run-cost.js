@@ -30,6 +30,18 @@ function sh(cmd, args) {
   return execFileSync(cmd, args, { encoding: 'utf8' }).trim();
 }
 
+// claude-code-action's execution-output file is sometimes the single final
+// "result" object directly, and sometimes (observed with show_full_output:
+// true, which every workflow in this repo sets) a JSON array of every
+// stream event from the session, with the "result" event as one entry
+// (usually last). Handle both shapes rather than assuming one -- an
+// assumption that silently broke every jq-based cost extraction in
+// agent-pipeline-v2.yml until issue #17's first real v2 run surfaced it.
+function extractResult(parsed) {
+  if (!Array.isArray(parsed)) return parsed;
+  return parsed.find((e) => e && e.type === 'result') || parsed[parsed.length - 1];
+}
+
 function formatModelUsage(modelUsage) {
   return Object.entries(modelUsage || {})
     .map(
@@ -75,7 +87,7 @@ function main() {
 
   let costSection;
   if (fs.existsSync(execPath)) {
-    const data = JSON.parse(fs.readFileSync(execPath, 'utf8'));
+    const data = extractResult(JSON.parse(fs.readFileSync(execPath, 'utf8')));
     const total = data.total_cost_usd;
     costSection = [
       '## Run Cost',
