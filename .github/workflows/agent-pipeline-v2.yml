@@ -369,8 +369,11 @@ jobs:
         run: node scripts/log-stage-cost.js "${{ inputs.issue_number }}" "Implementer (${{ matrix.task.index }}/${{ matrix.task.total }})" "$RUNNER_TEMP/claude-execution-output.json"
 
   tester:
-    needs: [analyzer, implementer]
-    if: always() && needs.implementer.result == 'success'
+    needs: [analyzer, planner, implementer]
+    if: |
+      always() &&
+      needs.planner.result == 'success' &&
+      (needs.planner.outputs.tasks == '[]' || needs.implementer.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write
