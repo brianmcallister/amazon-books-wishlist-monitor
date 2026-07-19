@@ -370,7 +370,7 @@ jobs:
 
   tester:
     needs: [analyzer, implementer]
-    if: needs.implementer.result == 'success'
+    if: always() && needs.implementer.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -432,7 +432,7 @@ jobs:
 
   deployer:
     needs: [analyzer, planner, plan-validator, tester]
-    if: needs.tester.result == 'success' && needs.tester.outputs.live_check_warranted == 'false'
+    if: always() && needs.tester.result == 'success' && needs.tester.outputs.live_check_warranted == 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -501,7 +501,7 @@ jobs:
 
   live-amazon-check:
     needs: [analyzer, tester]
-    if: needs.tester.result == 'success' && needs.tester.outputs.live_check_warranted == 'true'
+    if: always() && needs.tester.result == 'success' && needs.tester.outputs.live_check_warranted == 'true'
     runs-on: ubuntu-latest
     environment: live-amazon-check
     permissions:
@@ -586,7 +586,7 @@ jobs:
 
   deployer-after-live-check:
     needs: [analyzer, planner, plan-validator, tester, live-amazon-check]
-    if: needs.live-amazon-check.result == 'success'
+    if: always() && needs.live-amazon-check.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
