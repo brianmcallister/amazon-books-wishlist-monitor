@@ -12,6 +12,7 @@ const {
   buildUpdatedState,
   pruneState,
   formatSuppressionSummary,
+  isDryRun,
 } = require('../notification-state');
 
 test('extractAsin extracts the 10-character ASIN from a /dp/ URL', () => {
@@ -121,4 +122,25 @@ test('pruneState removes entries older than 14 days and keeps recent ones', () =
 test('formatSuppressionSummary formats the exact required summary line', () => {
   const line = formatSuppressionSummary({ totalMatches: 3, suppressedCount: 1, freshCount: 2, threshold: 5 });
   assert.equal(line, '3 item(s) under $5. 1 already notified within 14 days, suppressed. 2 fresh match(es).');
+});
+
+test('isDryRun returns true when DRY_RUN is exactly the string "true"', () => {
+  assert.equal(isDryRun({ DRY_RUN: 'true' }), true);
+});
+
+test('isDryRun returns false when DRY_RUN is unset', () => {
+  assert.equal(isDryRun({}), false);
+});
+
+test('isDryRun returns false when DRY_RUN is "false"', () => {
+  assert.equal(isDryRun({ DRY_RUN: 'false' }), false);
+});
+
+test('isDryRun returns false when DRY_RUN is an empty string', () => {
+  assert.equal(isDryRun({ DRY_RUN: '' }), false);
+});
+
+test('isDryRun is case-sensitive: "TRUE" or "True" do not enable dry-run', () => {
+  assert.equal(isDryRun({ DRY_RUN: 'TRUE' }), false);
+  assert.equal(isDryRun({ DRY_RUN: 'True' }), false);
 });

@@ -27,6 +27,10 @@ function isSuppressed(notifiedAtIso, now) {
   return now.getTime() - notifiedAt < SUPPRESSION_WINDOW_MS;
 }
 
+function isDryRun(env) {
+  return env.DRY_RUN === 'true';
+}
+
 function partitionMatches(matches, state, now) {
   const freshMatches = [];
   const suppressedMatches = [];
@@ -76,4 +80,5 @@ module.exports = {
   buildUpdatedState,
   pruneState,
   formatSuppressionSummary,
+  isDryRun,
 };
