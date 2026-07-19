@@ -26,6 +26,15 @@ function sh(cmd, args) {
   return execFileSync(cmd, args, { encoding: 'utf8' }).trim();
 }
 
+// See scripts/append-run-cost.js's extractResult() for why: the execution-
+// output file is sometimes the single final "result" object, sometimes a
+// full array of stream events (observed with show_full_output: true, set
+// throughout this repo's workflows) with "result" as one entry.
+function extractResult(parsed) {
+  if (!Array.isArray(parsed)) return parsed;
+  return parsed.find((e) => e && e.type === 'result') || parsed[parsed.length - 1];
+}
+
 function main() {
   const [issueNumber, stageLabel, execPath] = process.argv.slice(2);
   if (!issueNumber || !stageLabel || !execPath) {
@@ -38,7 +47,7 @@ function main() {
     process.exit(0); // don't fail the job over missing cost telemetry
   }
 
-  const data = JSON.parse(fs.readFileSync(execPath, 'utf8'));
+  const data = extractResult(JSON.parse(fs.readFileSync(execPath, 'utf8')));
   const logLine = JSON.stringify({
     issue: parseInt(issueNumber, 10),
     stage: stageLabel,

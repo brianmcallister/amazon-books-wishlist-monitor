@@ -143,8 +143,9 @@ jobs:
         id: cost
         run: |
           if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
-            echo "cost_usd=$(jq -r '.total_cost_usd' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
-            echo "num_turns=$(jq -r '.num_turns' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
           else
             echo "cost_usd=0" >> "$GITHUB_OUTPUT"
             echo "num_turns=0" >> "$GITHUB_OUTPUT"
@@ -227,8 +228,9 @@ jobs:
         id: cost
         run: |
           if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
-            echo "cost_usd=$(jq -r '.total_cost_usd' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
-            echo "num_turns=$(jq -r '.num_turns' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
           else
             echo "cost_usd=0" >> "$GITHUB_OUTPUT"
             echo "num_turns=0" >> "$GITHUB_OUTPUT"
@@ -287,8 +289,9 @@ jobs:
         id: cost
         run: |
           if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
-            echo "cost_usd=$(jq -r '.total_cost_usd' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
-            echo "num_turns=$(jq -r '.num_turns' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
           else
             echo "cost_usd=0" >> "$GITHUB_OUTPUT"
             echo "num_turns=0" >> "$GITHUB_OUTPUT"
@@ -419,8 +422,9 @@ jobs:
         id: cost
         run: |
           if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
-            echo "cost_usd=$(jq -r '.total_cost_usd' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
-            echo "num_turns=$(jq -r '.num_turns' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
           else
             echo "cost_usd=0" >> "$GITHUB_OUTPUT"
             echo "num_turns=0" >> "$GITHUB_OUTPUT"
@@ -470,8 +474,9 @@ jobs:
         id: cost
         run: |
           if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
-            echo "cost_usd=$(jq -r '.total_cost_usd' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
-            echo "num_turns=$(jq -r '.num_turns' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
           else
             echo "cost_usd=0" >> "$GITHUB_OUTPUT"
             echo "num_turns=0" >> "$GITHUB_OUTPUT"
@@ -624,8 +629,9 @@ jobs:
         id: cost
         run: |
           if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
-            echo "cost_usd=$(jq -r '.total_cost_usd' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
-            echo "num_turns=$(jq -r '.num_turns' "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
           else
             echo "cost_usd=0" >> "$GITHUB_OUTPUT"
             echo "num_turns=0" >> "$GITHUB_OUTPUT"
