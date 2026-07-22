@@ -94,7 +94,7 @@ function main() {
     console.error(
       `WARNING: multiple existing branches match issue-${issueNumber}-*: ${branches
         .map((b) => b.name)
-        .join(', ')}. Picked ${branch} -- this is worth the Orchestrator flagging as ambiguous rather than silently trusting.`
+        .join(', ')}. Picked ${branch} -- this is worth the Analyzer flagging as ambiguous rather than silently trusting.`
     );
   }
 
