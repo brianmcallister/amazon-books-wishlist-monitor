@@ -1,16 +1,32 @@
-name: Agent Pipeline
+name: Agent Pipeline (split architecture)
 
-# Single trigger, single input: the Actions "Run workflow" button both starts a
-# fresh pipeline run and resumes one that stopped early. See
-# docs/AGENT_HARNESS.md -> "How this actually runs" for the full design this
-# file implements -- that doc is the spec; this file should not duplicate its
-# reasoning, only its mechanics.
+# Unattended, issue-driven feature pipeline -- see docs/AGENT_HARNESS.md for
+# the full design. Each pipeline stage is its own GitHub Actions job, running
+# its own top-level claude-code-action session directly against the same
+# .claude/agents/*.md files -- no single long-running session, no in-process
+# subagent dispatch. This replaced an earlier single-session design (one job,
+# one Claude Code session acting as an "Orchestrator" that dispatched every
+# stage in-process via the Agent tool) after real measurement showed that
+# design's own ever-growing session was the dominant cost/time driver, not
+# the actual per-stage work -- see AGENT_HARNESS.md's "How this actually
+# runs" and the debugging-history section at the end for the real numbers
+# and the real bugs found getting here.
+#
+# KNOWN, DELIBERATE GAP: no skip-if-already-done resume logic. Every stage
+# job uses scripts/resolve-pipeline-state.js for the fresh-start-vs-resume
+# branch facts, but nothing looks at "which .agents files already exist" and
+# skips stages that already finished -- a re-run after a mid-pipeline
+# failure currently redoes every stage from Analyzer onward, not just the
+# one that stopped. Solving this properly (each job checking whether its own
+# artifact already exists, and if so reading committed state instead of
+# re-dispatching) is a separate, meaningfully-sized problem, tracked as an
+# open question in AGENT_HARNESS.md rather than solved here.
 
 on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: 'Issue number to work (fresh start if its branch does not exist yet, resume otherwise)'
+        description: 'Issue number to work'
         required: true
         type: string
 
@@ -24,17 +40,18 @@ env:
   SUPERPOWERS_PLUGIN: superpowers@superpowers-marketplace
 
 jobs:
-  orchestrator:
+  analyzer:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
       issues: write
       id-token: write
     outputs:
-      live_check_warranted: ${{ steps.extract.outputs.live_check_warranted }}
       branch: ${{ steps.resolve.outputs.branch }}
-      run_complete: ${{ steps.extract.outputs.run_complete }}
+      classification: ${{ steps.extract.outputs.classification }}
+      fully_specified: ${{ steps.extract.outputs.fully_specified }}
+      cost_usd: ${{ steps.cost.outputs.cost_usd }}
+      num_turns: ${{ steps.cost.outputs.num_turns }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +63,116 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/resolve-pipeline-state.js "${{ inputs.issue_number }}"
 
+      # Every other job in this pipeline checks out `needs.analyzer.outputs.branch`
+      # directly and then runs scripts/*.js from that checkout. A resumed branch
+      # can be arbitrarily old, so pipeline-infra scripts added to `main` since it
+      # was created (e.g. scripts/log-stage-cost.js, scripts/compose-run-cost.js
+      # -- see issue #17's first v2 run, which hit exactly this as MODULE_NOT_FOUND)
+      # are simply missing from its tree. A fresh-start branch is created from
+      # `main` moments later by the Claude step below, so it's already current --
+      # this only matters on resume. Squash-merge-only (see docs/AGENT_HARNESS.md)
+      # makes this merge commit invisible in the final PR either way.
+      - name: Sync resumed branch with latest main
+        if: steps.resolve.outputs.is_resume == 'true'
+        env:
+          BRANCH: ${{ steps.resolve.outputs.branch }}
+        run: |
+          git fetch origin "$BRANCH" main
+          git checkout -B "$BRANCH" "origin/$BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git merge --no-edit origin/main; then
+            echo "::error::Merging origin/main into $BRANCH hit a conflict -- resolve manually before re-running."
+            exit 1
+          fi
+          git push origin "$BRANCH"
+
+      - id: run-claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: 'true'
+          prompt: |
+            You are running as this job's own top-level Claude Code session.
+            Follow `.claude/agents/analyzer.md` exactly.
+
+            ISSUE NUMBER: ${{ inputs.issue_number }}
+            REPO: ${{ github.repository }}
+            BRANCH: ${{ steps.resolve.outputs.branch }}
+            THIS RUN IS A: ${{ steps.resolve.outputs.is_resume == 'true' && 'RESUME (branch already exists)' || 'FRESH START (create it from main)' }}
+            .agents/*.md FILES ALREADY ON THAT BRANCH: ${{ steps.resolve.outputs.agents_files_present }}
+            A PRIOR CHECKPOINT COMMENT WAS FOUND: ${{ steps.resolve.outputs.last_checkpoint_found }}
+            NEW ISSUE COMMENTS SINCE THAT CHECKPOINT:
+            ${{ steps.resolve.outputs.new_guidance }}
+
+            Use BRANCH exactly as given -- it was already resolved
+            deterministically before this job started. If fresh start,
+            create it from `main` and check it out. If resume, check it
+            out as-is. Note: this job runs unconditionally on every
+            workflow trigger, including a resume -- there is currently no
+            skip-if-already-analyzed logic, so re-analyze even if
+            `.agents/analysis.md` already exists.
+
+            Read `.claude/agents/analyzer.md` and do exactly what it says.
+            Commit and push per its own instructions -- this is the only
+            chance this job gets to persist anything.
+
+            Report structured output: `classification` (exactly
+            "pure-logic" or "scraping-touching"), `fully_specified`
+            (boolean -- false if you found real gaps that need a human,
+            per analyzer.md's own instructions), and `summary`.
+          claude_args: |
+            --model claude-haiku-4-5
+            --permission-mode bypassPermissions
+            --max-turns 40
+            --disallowedTools "ScheduleWakeup,mcp__*"
+            --json-schema '{"type":"object","properties":{"classification":{"type":"string","enum":["pure-logic","scraping-touching"]},"fully_specified":{"type":"boolean"},"summary":{"type":"string"}},"required":["classification","fully_specified","summary"]}'
+
+      - name: Extract structured output
+        id: extract
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
+        run: |
+          echo "classification=$(echo "$STRUCTURED_OUTPUT" | jq -r '.classification')" >> "$GITHUB_OUTPUT"
+          echo "fully_specified=$(echo "$STRUCTURED_OUTPUT" | jq -r '.fully_specified')" >> "$GITHUB_OUTPUT"
+
+      - name: Extract cost
+        id: cost
+        run: |
+          if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+          else
+            echo "cost_usd=0" >> "$GITHUB_OUTPUT"
+            echo "num_turns=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment if not fully specified
+        if: steps.extract.outputs.fully_specified == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "${{ inputs.issue_number }}" --body "🤖 **Analyzer stopped** — issue #${{ inputs.issue_number }} isn't fully specified yet. See the analysis commit on branch \`${{ steps.resolve.outputs.branch }}\` for specifics. Reply with clarification and re-run this workflow with the same issue number to continue."
+
+  planner:
+    needs: analyzer
+    if: needs.analyzer.outputs.fully_specified == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      id-token: write
+    outputs:
+      tasks: ${{ steps.extract.outputs.tasks }}
+      cost_usd: ${{ steps.cost.outputs.cost_usd }}
+      num_turns: ${{ steps.cost.outputs.num_turns }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyzer.outputs.branch }}
+          fetch-depth: 0
+
       - id: run-claude
         uses: anthropics/claude-code-action@v1
         with:
@@ -54,233 +181,232 @@ jobs:
           plugins: ${{ env.SUPERPOWERS_PLUGIN }}
           show_full_output: 'true'
           prompt: |
-            You are the Orchestrator for this repo's agent pipeline. Read
-            CLAUDE.md first -- it's short and its load-bearing code list and
-            stage-order line are directly relevant to dispatching Analyzer
-            and interpreting its classification.
-
-            **You do not need to read docs/AGENT_HARNESS.md in full.**
-            Everything you need to run this pipeline correctly -- the stage
-            list, which subagent file and model each one uses, and how to
-            react to a stage that can't proceed -- is inlined below. That
-            doc has the full design rationale (why Superpowers, cost
-            levers, observability choices, explicit non-goals) if you want
-            deeper context on any specific decision, but it's ~11K tokens
-            of mostly background with no bearing on dispatching this run
-            correctly, and reading it buys you nothing operationally that
-            isn't already inlined here.
+            You are running as this job's own top-level Claude Code session,
+            picking up right after the Analyzer job (a separate job,
+            separate session, already finished and pushed its commit).
+            Follow `.claude/agents/planner.md` exactly.
 
             ISSUE NUMBER: ${{ inputs.issue_number }}
             REPO: ${{ github.repository }}
+            BRANCH: ${{ needs.analyzer.outputs.branch }} (already checked out)
 
-            PIPELINE STAGES -- dispatch each via the `Agent` tool with the
-            given subagent file, unless noted otherwise:
-            - Analyzer: `.claude/agents/analyzer.md` (Haiku 4.5,
-              `effort: low` by default -- override to Sonnet 5 via the
-              `Agent` tool's `model` param if the issue itself already
-              reads as likely scraping/SMTP-touching, since you won't have
-              Analyzer's own classification yet at dispatch time)
-            - Planner: `.claude/agents/planner.md` (Sonnet 5)
-            - Plan Validator: `.claude/agents/plan-validator.md` (Sonnet 5)
-              -- only dispatch this if Analyzer classified the task
-              scraping-touching; skip it entirely otherwise
-            - Implementer: `.claude/agents/implementer.md` (Sonnet 5) -- a
-              fresh dispatch per task in the Planner's breakdown, not one
-              dispatch for the whole plan
-            - Tester: `.claude/agents/tester.md` (Sonnet 5)
-            - Deployer: `.claude/agents/deployer.md` (Sonnet 5)
-            - PR Risk Analyzer: not a subagent -- `node
-              scripts/pr-risk-check.js <issue-number> <pr-number>` via
-              Bash, run after Deployer reports the PR number it opened or
-              updated
+            Read `.agents/analysis.md` first -- confirm it's there and
+            makes sense before proceeding; if missing or contradictory,
+            say so and stop rather than guessing.
 
-            FAILURE HANDLING -- different failure modes get different
-            responses:
-            1. Infra-level crash (API error, runner blip, timeout) -- no
-               custom logic needed; re-running the same workflow with the
-               same issue number resumes from git state.
-            2. A stage can self-correct within its own scope (e.g. Tester
-               fixing an obvious bug, a per-task Implementer addressing its
-               own review findings) -- bounded to ONE attempt, then stop if
-               it doesn't hold.
-            3. A downstream stage rejects an upstream stage's work in a way
-               it can't fix itself (e.g. Plan Validator rejects the plan
-               outright) -- do NOT auto-loop back to re-run the earlier
-               stage. Stop with a comment explaining the disagreement; a
-               human decides how to proceed.
-            4. The live-check job itself fails or comes back inconclusive
-               -- report it as a terminal result, do not trigger the live
-               check again.
-            5. A stage needs human clarification (the Analyzer's core job)
-               -- stop rather than guess; put the specific gap in both the
-               stage's own commit and the issue comment.
-            6. A stage hits a real platform restriction it can't cross --
-               the known case is GitHub refusing any push touching
-               `.github/workflows/*` from this pipeline's credentials (not
-               a bug, a real GitHub-enforced restriction, not something to
-               retry). Stop, name the exact blocker and the exact diff
-               needed (usually already spelled out in `.agents/plan.md`)
-               in the issue comment, and wait for a human to apply it by
-               hand -- titled `Manual (#<issue-number>):
-               (<task-number>/<total-tasks>) <summary>.` -- and push it,
-               then re-trigger with the same issue number.
+            Read `.claude/agents/planner.md` and do exactly what it says.
+            Commit and push per its own instructions.
 
-            In every case above, post a comment on issue
-            #${{ inputs.issue_number }} explaining what happened and what's
-            needed, then stop.
-
-            Include the issue number in every subagent dispatch prompt --
-            each subagent's own instructions tell it to title its commits
-            `{Stage name} (#${{ inputs.issue_number }}): <summary>.` (the
-            Implementer additionally includes its task position, e.g.
-            `Implementer (#${{ inputs.issue_number }}): (3/8) <summary>.`),
-            so every commit this pipeline makes shows up on the issue's own
-            page with the actor and sequence clear at a glance -- that only
-            works if each subagent actually knows the number, so don't leave
-            it implicit.
-
-            PRECOMPUTED FACTS (from `scripts/resolve-pipeline-state.js`,
-            already run as a step before you -- these are facts, not your
-            own guesses, so use them instead of re-deriving any of this
-            yourself via tool calls):
-            BRANCH: ${{ steps.resolve.outputs.branch }}
-            THIS RUN IS A: ${{ steps.resolve.outputs.is_resume == 'true' && 'RESUME (this branch already exists)' || 'FRESH START (this branch does not exist yet)' }}
-            .agents/*.md FILES ALREADY COMMITTED ON THAT BRANCH (empty on a
-            fresh start, or if none have landed yet): ${{ steps.resolve.outputs.agents_files_present }}
-            A PRIOR PIPELINE CHECKPOINT COMMENT WAS FOUND ON THE ISSUE: ${{ steps.resolve.outputs.last_checkpoint_found }}
-            NEW ISSUE COMMENTS SINCE THAT LAST CHECKPOINT (empty means
-            nothing new to fold in -- just retry whatever stage stopped,
-            plain, no correction):
-            ${{ steps.resolve.outputs.new_guidance }}
-
-            Use BRANCH exactly as given above -- do not recompute or rename
-            it yourself. If FRESH START, create it from `main`. If RESUME,
-            check it out. The `.agents/*.md` list above was read directly
-            from that branch's real committed tree via the GitHub API, not
-            from any comment's prose -- trust it over a checkpoint comment's
-            claims about what finished (this repo has hit the exact failure
-            mode of a checkpoint comment describing stages that were never
-            actually pushed). If that file list looks inconsistent with
-            what a checkpoint comment claims, or with what you find once
-            you actually look at `git log` yourself, say so explicitly and
-            trust the real git/API state, not the prose. What's precomputed
-            above is the mechanical part of the fresh-start/resume
-            decision; how to actually fold in new guidance or handle
-            something that looks wrong is still your judgment call, not
-            the script's.
-
-            Then run the pipeline stages in order, per the PIPELINE STAGES
-            list above -- Analyzer, Planner, Plan Validator (only if the
-            Analyzer classified the task scraping-touching), Implementer
-            (one fresh dispatch per task), Tester -- then, **only if the
-            Tester determines a live Amazon check is NOT warranted,
-            continue in this same job/session** to Deployer, then the PR
-            Risk Analyzer script, per FAILURE HANDLING above for what to do
-            when a stage can't proceed cleanly.
-
-            The only reason to stop *before* Deployer/the PR Risk Analyzer
-            script is if the Tester determines a live check IS warranted --
-            that's the one hard boundary in this pipeline, and it belongs to
-            a second, approval-gated job, never to you. Everything else
-            (pure-logic tasks, or scraping-touching tasks where fixtures
-            already proved sufficient) has no such boundary and should run
-            end-to-end to a real PR in one job, not stop partway and wait
-            for a human to manually continue something that doesn't
-            actually need human approval.
-
-            Log your progress to this job's own output as you go, so someone
-            watching the Actions log (not just reading a summary afterward)
-            can follow what's happening and when: immediately before
-            dispatching each stage subagent (each Implementer task counts as
-            its own stage here), run a Bash command like `echo "[$(date -u
-            +%H:%M:%S)] STAGE START: <stage name> -- <one-line reason/task>"`,
-            and immediately after it returns, `echo "[$(date -u +%H:%M:%S)]
-            STAGE END: <stage name> -- <one-line outcome>"`. Do this for
-            every stage, not just the ones that run into trouble -- the
-            point is a sequential, timestamped trace of the whole run, not
-            just a post-hoc summary.
-
-            Every `Agent` tool dispatch returns a `<usage>` block after the
-            subagent finishes (`subagent_tokens`, `tool_uses`,
-            `duration_ms`) -- capture these as you go and build a running
-            per-stage table (one row per stage you actually dispatched,
-            skipping Plan Validator's row if it was skipped). This is a
-            token/tool-use/duration count, not a dollar figure -- you
-            cannot know this run's actual dollar cost from inside your own
-            session, since later stages (including your own remaining
-            turns) still cost money that hasn't been spent yet at any
-            point before your session ends. A separate deterministic step
-            appends the real total cost to the PR after your session
-            completes; your job is just the per-stage table, reported as
-            `stage_usage_markdown` in your structured output (a markdown
-            table, columns Stage | Tokens | Tool calls | Duration).
-
-            CRITICAL, non-negotiable: run `git push` yourself (not a
-            subagent's job -- yours, since you're the one who knows when
-            each stage actually finished) immediately after every single
-            stage's commit(s) land, including after each individual
-            Implementer task dispatch and after Deployer's commit. (The PR
-            Risk Analyzer script pushes its own commit itself -- it's not a
-            subagent, so there's no separate push step for you to run after
-            it, just confirm it succeeded.) Do this at every stage, not just
-            at the end. This job runs on an ephemeral runner -- anything
-            committed but not pushed before the job ends is permanently
-            lost the moment the runner is torn down, no matter how
-            completely you describe it in a checkpoint comment afterward.
-
-            Before your turn ends for ANY reason -- normal completion after
-            the PR Risk Analyzer script, stopping after Tester because a
-            live check is warranted, a Failure Handling stop, anything --
-            confirm with
-            `git status` and `git log origin/<branch>..HEAD` (or equivalent)
-            that there is nothing committed locally that isn't already on
-            the remote branch. If there is, push it before you stop. A
-            checkpoint comment describing work that isn't actually on the
-            remote branch is worse than no comment at all.
-
-            You do not have live network access to Amazon and must not add
-            any. Do not perform a live Amazon check yourself under any
-            circumstances -- that is the Tester's determination only
-            (warranted or not, with reasoning), carried out afterward, if
-            warranted, by a separate approval-gated job, never by you.
-
-            **If the Tester determines a live check IS warranted**, stop
-            right there -- do not attempt Deployer or the PR Risk Analyzer
-            script yourself. Report your structured output and end; the
-            second job picks up Deployer and then the PR Risk Analyzer
-            script after the live check completes and is approved.
-
-            **If the Tester determines a live check is NOT warranted**,
-            continue in this same session to Deployer, then the PR Risk
-            Analyzer script. That's this job's normal successful ending: a
-            PR opened or updated (or Deployer's own keep/discard choice,
-            per its own instructions) with its risk determination posted
-            as a PR comment, everything pushed, and a final comment/PR
-            description in place.
-
-            Report structured output at the end: whether a live Amazon check
-            is warranted per the Tester's determination, `run_complete`,
-            and `stage_usage_markdown` (the branch name isn't part of this
-            -- it's already a job output sourced from the precomputed
-            BRANCH fact above, not from anything you report). Set
-            `run_complete: false` if for ANY reason you did not reach a
-            genuine, intentional stopping point of your own choosing --
-            including if you notice your own turn being cut off,
-            interrupted, or forced to answer before a dispatched subagent
-            (e.g. Tester) actually finished. In that case, `live_check_warranted`
-            should just be your best guess and must not be treated as a
-            confirmed determination by anything downstream -- say so in
-            `summary` too, but `run_complete: false` is the machine-readable
-            signal, not prose a human has to notice. Only set `run_complete:
-            true` for a real stop: normal completion after Tester, or a
-            deliberate Failure Handling stop where you chose to end your own
-            turn after posting a comment.
+            Report structured output: `tasks` -- a JSON array of objects,
+            one per task in your plan's breakdown, each shaped exactly
+            `{"index": <1-based position>, "total": <total task count>,
+            "description": "<short task label; full detail lives in
+            .agents/plan.md>"}`. This drives a matrix of separate
+            Implementer jobs downstream, one per task -- it's read
+            mechanically, not re-derived by a human, so get the count and
+            order right. Also report `summary`.
           claude_args: |
             --model claude-sonnet-5
             --permission-mode bypassPermissions
-            --max-turns 250
+            --max-turns 60
             --disallowedTools "ScheduleWakeup,mcp__*"
-            --json-schema '{"type":"object","properties":{"live_check_warranted":{"type":"boolean"},"run_complete":{"type":"boolean"},"stage_usage_markdown":{"type":"string"},"summary":{"type":"string"}},"required":["live_check_warranted","run_complete","stage_usage_markdown","summary"]}'
+            --json-schema '{"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"index":{"type":"integer"},"total":{"type":"integer"},"description":{"type":"string"}},"required":["index","total","description"]}},"summary":{"type":"string"}},"required":["tasks","summary"]}'
+
+      - name: Extract structured output
+        id: extract
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
+        run: |
+          echo "tasks=$(echo "$STRUCTURED_OUTPUT" | jq -c '.tasks')" >> "$GITHUB_OUTPUT"
+
+      - name: Extract cost
+        id: cost
+        run: |
+          if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+          else
+            echo "cost_usd=0" >> "$GITHUB_OUTPUT"
+            echo "num_turns=0" >> "$GITHUB_OUTPUT"
+          fi
+
+  plan-validator:
+    needs: [analyzer, planner]
+    if: needs.analyzer.outputs.classification == 'scraping-touching'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      id-token: write
+    outputs:
+      approved: ${{ steps.extract.outputs.approved }}
+      cost_usd: ${{ steps.cost.outputs.cost_usd }}
+      num_turns: ${{ steps.cost.outputs.num_turns }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyzer.outputs.branch }}
+          fetch-depth: 0
+
+      - id: run-claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: 'true'
+          prompt: |
+            You are running as a standalone job, picking up right after
+            the Planner job. Follow `.claude/agents/plan-validator.md`
+            exactly.
+
+            ISSUE NUMBER: ${{ inputs.issue_number }}
+            REPO: ${{ github.repository }}
+            BRANCH: ${{ needs.analyzer.outputs.branch }} (already checked out)
+
+            Commit and push per its own instructions.
+
+            Report structured output: `approved` (boolean) and `summary`.
+          claude_args: |
+            --model claude-sonnet-5
+            --permission-mode bypassPermissions
+            --max-turns 40
+            --disallowedTools "ScheduleWakeup,mcp__*"
+            --json-schema '{"type":"object","properties":{"approved":{"type":"boolean"},"summary":{"type":"string"}},"required":["approved","summary"]}'
+
+      - name: Extract structured output
+        id: extract
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
+        run: |
+          echo "approved=$(echo "$STRUCTURED_OUTPUT" | jq -r '.approved')" >> "$GITHUB_OUTPUT"
+
+      - name: Extract cost
+        id: cost
+        run: |
+          if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+          else
+            echo "cost_usd=0" >> "$GITHUB_OUTPUT"
+            echo "num_turns=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment if plan rejected
+        if: steps.extract.outputs.approved == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "${{ inputs.issue_number }}" --body "🤖 **Plan Validator rejected the plan** for issue #${{ inputs.issue_number }} — see the plan-validation commit on branch \`${{ needs.analyzer.outputs.branch }}\` for specifics. This does not auto-loop back to the Planner; a human decides how to proceed (re-run with guidance, fix the plan by hand, or restart)."
+
+  implementer:
+    needs: [analyzer, planner, plan-validator]
+    if: |
+      always() &&
+      needs.planner.result == 'success' &&
+      needs.planner.outputs.tasks != '[]' &&
+      (needs.plan-validator.result == 'skipped' || (needs.plan-validator.result == 'success' && needs.plan-validator.outputs.approved == 'true'))
+    strategy:
+      matrix:
+        task: ${{ fromJson(needs.planner.outputs.tasks) }}
+      max-parallel: 1
+      fail-fast: true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyzer.outputs.branch }}
+          fetch-depth: 0
+
+      - id: run-claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: ${{ env.SUPERPOWERS_MARKETPLACE }}
+          plugins: ${{ env.SUPERPOWERS_PLUGIN }}
+          show_full_output: 'true'
+          prompt: |
+            You are running as this job's own top-level Claude Code session
+            -- task ${{ matrix.task.index }} of ${{ matrix.task.total }} in
+            the Planner's breakdown, one of several separate Implementer
+            jobs running sequentially. Follow `.claude/agents/implementer.md`
+            exactly.
+
+            ISSUE NUMBER: ${{ inputs.issue_number }}
+            REPO: ${{ github.repository }}
+            BRANCH: ${{ needs.analyzer.outputs.branch }} (already checked
+            out, with all earlier tasks' commits already on it)
+
+            YOUR TASK (${{ matrix.task.index }}/${{ matrix.task.total }}):
+            ${{ matrix.task.description }}
+
+            Read `.agents/plan.md` for the full detail on this task (exact
+            file paths, verification steps) -- the description above is
+            just a short label. Only implement this one task; earlier
+            tasks are already committed on the branch, later tasks are a
+            separate job's responsibility.
+
+            Commit and push per implementer.md's own instructions.
+          claude_args: |
+            --model claude-sonnet-5
+            --permission-mode bypassPermissions
+            --max-turns 80
+            --disallowedTools "ScheduleWakeup,mcp__*"
+
+      - name: Log stage cost
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/log-stage-cost.js "${{ inputs.issue_number }}" "Implementer (${{ matrix.task.index }}/${{ matrix.task.total }})" "$RUNNER_TEMP/claude-execution-output.json"
+
+  tester:
+    needs: [analyzer, planner, implementer]
+    if: |
+      always() &&
+      needs.planner.result == 'success' &&
+      (needs.planner.outputs.tasks == '[]' || needs.implementer.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      id-token: write
+    outputs:
+      live_check_warranted: ${{ steps.extract.outputs.live_check_warranted }}
+      cost_usd: ${{ steps.cost.outputs.cost_usd }}
+      num_turns: ${{ steps.cost.outputs.num_turns }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyzer.outputs.branch }}
+          fetch-depth: 0
+
+      - id: run-claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: 'true'
+          prompt: |
+            You are running as a standalone job, picking up right after
+            all of this issue's Implementer jobs finished. Follow
+            `.claude/agents/tester.md` exactly.
+
+            ISSUE NUMBER: ${{ inputs.issue_number }}
+            REPO: ${{ github.repository }}
+            BRANCH: ${{ needs.analyzer.outputs.branch }} (already checked out)
+
+            Commit and push any fixes per its own instructions.
+
+            Report structured output: `live_check_warranted` (boolean)
+            and `summary`.
+          claude_args: |
+            --model claude-sonnet-5
+            --permission-mode bypassPermissions
+            --max-turns 60
+            --disallowedTools "ScheduleWakeup,mcp__*"
+            --json-schema '{"type":"object","properties":{"live_check_warranted":{"type":"boolean"},"summary":{"type":"string"}},"required":["live_check_warranted","summary"]}'
 
       - name: Extract structured output
         id: extract
@@ -288,27 +414,91 @@ jobs:
           STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
         run: |
           echo "live_check_warranted=$(echo "$STRUCTURED_OUTPUT" | jq -r '.live_check_warranted')" >> "$GITHUB_OUTPUT"
-          echo "run_complete=$(echo "$STRUCTURED_OUTPUT" | jq -r '.run_complete')" >> "$GITHUB_OUTPUT"
-          echo "stage_usage_markdown<<EOF_STAGE_USAGE" >> "$GITHUB_OUTPUT"
-          echo "$STRUCTURED_OUTPUT" | jq -r '.stage_usage_markdown' >> "$GITHUB_OUTPUT"
-          echo "EOF_STAGE_USAGE" >> "$GITHUB_OUTPUT"
 
-      - name: Append run cost to PR
-        if: steps.extract.outputs.run_complete == 'true' && steps.extract.outputs.live_check_warranted == 'false'
-        env:
-          STAGE_USAGE_MARKDOWN: ${{ steps.extract.outputs.stage_usage_markdown }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract cost
+        id: cost
         run: |
-          PR_NUMBER=$(gh pr list --head "${{ steps.resolve.outputs.branch }}" --json number --jq '.[0].number')
-          if [ -n "$PR_NUMBER" ]; then
-            node scripts/append-run-cost.js "$PR_NUMBER" "$RUNNER_TEMP/claude-execution-output.json"
+          if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
           else
-            echo "No open PR found for branch ${{ steps.resolve.outputs.branch }} -- Deployer likely chose keep/discard instead of opening one. Skipping cost report."
+            echo "cost_usd=0" >> "$GITHUB_OUTPUT"
+            echo "num_turns=0" >> "$GITHUB_OUTPUT"
+          fi
+
+  deployer:
+    needs: [analyzer, planner, plan-validator, tester]
+    if: always() && needs.tester.result == 'success' && needs.tester.outputs.live_check_warranted == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyzer.outputs.branch }}
+          fetch-depth: 0
+
+      - id: run-claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          plugin_marketplaces: ${{ env.SUPERPOWERS_MARKETPLACE }}
+          plugins: ${{ env.SUPERPOWERS_PLUGIN }}
+          show_full_output: 'true'
+          prompt: |
+            You are running as a standalone job, picking up right after
+            the Tester job determined no live Amazon check is warranted.
+            Follow `.claude/agents/deployer.md` exactly.
+
+            ISSUE NUMBER: ${{ inputs.issue_number }}
+            REPO: ${{ github.repository }}
+            BRANCH: ${{ needs.analyzer.outputs.branch }} (already checked out)
+
+            Commit and push per its own instructions. Report the PR number
+            you opened or updated (or say plainly if you chose keep/discard
+            instead) as your final output.
+          claude_args: |
+            --model claude-sonnet-5
+            --permission-mode bypassPermissions
+            --max-turns 60
+            --disallowedTools "ScheduleWakeup,mcp__*"
+
+      - name: Extract cost
+        id: cost
+        run: |
+          if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+          else
+            echo "cost_usd=0" >> "$GITHUB_OUTPUT"
+            echo "num_turns=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run PR Risk Analyzer and compose cost report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COST_ANALYZER: "${{ needs.analyzer.outputs.cost_usd }},${{ needs.analyzer.outputs.num_turns }}"
+          COST_PLANNER: "${{ needs.planner.outputs.cost_usd }},${{ needs.planner.outputs.num_turns }}"
+          COST_PLAN_VALIDATOR: ${{ needs.plan-validator.result == 'success' && format('{0},{1}', needs.plan-validator.outputs.cost_usd, needs.plan-validator.outputs.num_turns) || '' }}
+          COST_TESTER: "${{ needs.tester.outputs.cost_usd }},${{ needs.tester.outputs.num_turns }}"
+          COST_DEPLOYER: "${{ steps.cost.outputs.cost_usd }},${{ steps.cost.outputs.num_turns }}"
+        run: |
+          PR_NUMBER=$(gh pr list --head "${{ needs.analyzer.outputs.branch }}" --json number --jq '.[0].number')
+          if [ -n "$PR_NUMBER" ]; then
+            node scripts/pr-risk-check.js "${{ inputs.issue_number }}" "$PR_NUMBER"
+            node scripts/compose-run-cost.js "${{ inputs.issue_number }}" "$PR_NUMBER"
+          else
+            echo "No open PR found for branch ${{ needs.analyzer.outputs.branch }} -- Deployer likely chose keep/discard. Skipping PR Risk Analyzer and cost report."
           fi
 
   live-amazon-check:
-    needs: orchestrator
-    if: needs.orchestrator.outputs.run_complete == 'true' && needs.orchestrator.outputs.live_check_warranted == 'true'
+    needs: [analyzer, tester]
+    if: always() && needs.tester.result == 'success' && needs.tester.outputs.live_check_warranted == 'true'
     runs-on: ubuntu-latest
     environment: live-amazon-check
     permissions:
@@ -320,14 +510,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.orchestrator.outputs.branch }}
+          ref: ${{ needs.analyzer.outputs.branch }}
           fetch-depth: 0
 
       - name: Trigger check-wishlist.yml and wait for it
         id: trigger-live-check
         uses: actions/github-script@v7
         env:
-          PIPELINE_BRANCH: ${{ needs.orchestrator.outputs.branch }}
+          PIPELINE_BRANCH: ${{ needs.analyzer.outputs.branch }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -391,7 +581,22 @@ jobs:
           git commit -m "Live Check (#${{ inputs.issue_number }}): Add fixture from approved live Amazon check."
           git push
 
-      - id: run-claude-continue
+  deployer-after-live-check:
+    needs: [analyzer, planner, plan-validator, tester, live-amazon-check]
+    if: always() && needs.live-amazon-check.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyzer.outputs.branch }}
+          fetch-depth: 0
+
+      - id: run-claude
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -399,91 +604,49 @@ jobs:
           plugins: ${{ env.SUPERPOWERS_PLUGIN }}
           show_full_output: 'true'
           prompt: |
-            You are resuming this repo's agent pipeline for issue
-            #${{ inputs.issue_number }}, on branch
-            ${{ needs.orchestrator.outputs.branch }}, immediately after an
+            You are running as a standalone job, picking up right after an
             approved, now-complete live Amazon check (see
             .agents/live-check-result.md and the new fixture just committed
-            to test/fixtures/).
+            to test/fixtures/). Follow `.claude/agents/deployer.md` exactly.
 
-            You do not need to read docs/AGENT_HARNESS.md in full for this
-            -- you're only running two stages, both covered below. Read
-            `.agents/*.md` and recent commit history on this branch to
-            understand what the pipeline already did. The Tester stage is
-            done. Continue with the remaining stages:
+            ISSUE NUMBER: ${{ inputs.issue_number }}
+            REPO: ${{ github.repository }}
+            BRANCH: ${{ needs.analyzer.outputs.branch }} (already checked out)
 
-            1. Dispatch Deployer via the `Agent` tool with subagent file
-               `.claude/agents/deployer.md` (Sonnet 5) -- it reads the
-               stage trail itself and composes the PR description; you
-               don't need to pre-digest `.agents/*.md` for it beyond
-               confirming it's actually there.
-            2. Once Deployer reports the PR number it opened or updated,
-               run `node scripts/pr-risk-check.js
-               ${{ inputs.issue_number }} <pr-number>` via Bash -- that's a
-               deterministic script, not a subagent, so there's no `Agent`
-               tool dispatch for it.
-
-            If either stage can't proceed cleanly, post a comment on the
-            issue (or the PR, if Deployer has opened one) explaining what
-            happened and what's needed, then stop -- don't retry
-            speculatively or auto-loop back to an earlier stage.
-
-            Include the issue number (${{ inputs.issue_number }}) in every
-            subagent dispatch prompt, same as the earlier job -- each
-            subagent's own instructions tell it to title its commits
-            `{Stage name} (#${{ inputs.issue_number }}): <summary>.`
-
-            Log your progress the same way every other stage in this
-            pipeline does: immediately before and after dispatching each
-            stage subagent, `echo "[$(date -u +%H:%M:%S)] STAGE START/END:
-            <stage name> -- <one-line reason/outcome>"` via Bash, so the
-            Actions log reads as a sequential, timestamped trace.
-
-            Capture the `<usage>` block the `Agent` tool returns after
-            Deployer finishes (`subagent_tokens`, `tool_uses`,
-            `duration_ms`) and report it as `stage_usage_markdown` in your
-            structured output -- a one-row markdown table (Stage | Tokens |
-            Tool calls | Duration) for Deployer. This is a token/duration
-            count, not a dollar figure; a separate deterministic step
-            appends the real dollar total for *this job's own session*
-            once you're done (Analyzer through Tester's cost was a
-            separate, earlier session in the first job -- not included in
-            what that step reports here).
-
-            CRITICAL, non-negotiable, same as every other stage in this
-            pipeline: `git push` yourself immediately after Deployer's
-            commit(s) -- don't wait until everything is done. (The PR Risk
-            Analyzer script pushes its own commit itself once you run it;
-            just confirm it succeeded.) This job runs on an ephemeral
-            runner -- anything committed but not pushed before it ends is
-            gone.
-
-            You do not have live network access to Amazon and must not add
-            any -- the one live check for this run already happened.
+            Commit and push per its own instructions. Report the PR number
+            you opened or updated (or say plainly if you chose keep/discard
+            instead) as your final output.
           claude_args: |
             --model claude-sonnet-5
             --permission-mode bypassPermissions
-            --max-turns 250
+            --max-turns 60
             --disallowedTools "ScheduleWakeup,mcp__*"
-            --json-schema '{"type":"object","properties":{"stage_usage_markdown":{"type":"string"},"summary":{"type":"string"}},"required":["stage_usage_markdown","summary"]}'
 
-      - name: Extract structured output
-        id: extract-continue
-        env:
-          STRUCTURED_OUTPUT: ${{ steps.run-claude-continue.outputs.structured_output }}
+      - name: Extract cost
+        id: cost
         run: |
-          echo "stage_usage_markdown<<EOF_STAGE_USAGE" >> "$GITHUB_OUTPUT"
-          echo "$STRUCTURED_OUTPUT" | jq -r '.stage_usage_markdown' >> "$GITHUB_OUTPUT"
-          echo "EOF_STAGE_USAGE" >> "$GITHUB_OUTPUT"
-
-      - name: Append run cost to PR
-        env:
-          STAGE_USAGE_MARKDOWN: "${{ steps.extract-continue.outputs.stage_usage_markdown }}\n\n_Note: this job resumed after an approved live Amazon check, in a separate session from the one that ran Analyzer through Tester -- this cost figure covers only Deployer and the PR Risk Analyzer script, not the full pipeline run._"
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_NUMBER=$(gh pr list --head "${{ needs.orchestrator.outputs.branch }}" --json number --jq '.[0].number')
-          if [ -n "$PR_NUMBER" ]; then
-            node scripts/append-run-cost.js "$PR_NUMBER" "$RUNNER_TEMP/claude-execution-output.json"
+          if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
+            RESULT_FILTER='if type=="array" then ((map(select(.type=="result")) | last) // .[-1]) else . end'
+            echo "cost_usd=$(jq -r "$RESULT_FILTER | .total_cost_usd" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
+            echo "num_turns=$(jq -r "$RESULT_FILTER | .num_turns" "$RUNNER_TEMP/claude-execution-output.json")" >> "$GITHUB_OUTPUT"
           else
-            echo "No open PR found for branch ${{ needs.orchestrator.outputs.branch }} -- Deployer likely chose keep/discard instead of opening one. Skipping cost report."
+            echo "cost_usd=0" >> "$GITHUB_OUTPUT"
+            echo "num_turns=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run PR Risk Analyzer and compose cost report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COST_ANALYZER: "${{ needs.analyzer.outputs.cost_usd }},${{ needs.analyzer.outputs.num_turns }}"
+          COST_PLANNER: "${{ needs.planner.outputs.cost_usd }},${{ needs.planner.outputs.num_turns }}"
+          COST_PLAN_VALIDATOR: ${{ needs.plan-validator.result == 'success' && format('{0},{1}', needs.plan-validator.outputs.cost_usd, needs.plan-validator.outputs.num_turns) || '' }}
+          COST_TESTER: "${{ needs.tester.outputs.cost_usd }},${{ needs.tester.outputs.num_turns }}"
+          COST_DEPLOYER: "${{ steps.cost.outputs.cost_usd }},${{ steps.cost.outputs.num_turns }}"
+        run: |
+          PR_NUMBER=$(gh pr list --head "${{ needs.analyzer.outputs.branch }}" --json number --jq '.[0].number')
+          if [ -n "$PR_NUMBER" ]; then
+            node scripts/pr-risk-check.js "${{ inputs.issue_number }}" "$PR_NUMBER"
+            node scripts/compose-run-cost.js "${{ inputs.issue_number }}" "$PR_NUMBER"
+          else
+            echo "No open PR found for branch ${{ needs.analyzer.outputs.branch }} -- Deployer likely chose keep/discard. Skipping PR Risk Analyzer and cost report."
           fi
