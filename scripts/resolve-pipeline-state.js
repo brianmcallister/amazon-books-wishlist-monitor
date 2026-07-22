@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deterministic pre-computation for the Orchestrator's "fresh start vs.
+// Deterministic pre-computation for the Analyzer job's "fresh start vs.
 // resume" decision. See docs/AGENT_HARNESS.md's "Fresh start vs. resume"
 // section for the design this implements.
 //
@@ -8,12 +8,13 @@
 // and any issue comments posted since the pipeline's own last checkpoint
 // comment. These are all mechanical git/API facts -- branch-name slugging,
 // "does this branch exist", "which .agents files are on it", "which issue
-// comments postdate the marker" -- that the Orchestrator was previously
-// re-deriving itself via tool calls on every run for no reason. This script
-// computes the facts; the Orchestrator still decides what to do with them
-// (how to fold in new guidance, whether to trust them over something odd it
-// finds in git log, etc.) -- see the caveat baked into agent-pipeline.yml's
-// prompt about not treating a stale checkpoint as ground truth.
+// comments postdate the marker" -- that would otherwise have to be
+// re-derived via tool calls on every run for no reason. This script
+// computes the facts; the Analyzer's own Claude session still decides what
+// to do with them (how to fold in new guidance, whether to trust them over
+// something odd it finds in git log, etc.) -- see the caveat baked into
+// agent-pipeline.yml's prompt about not treating a stale checkpoint as
+// ground truth.
 //
 // Usage: node scripts/resolve-pipeline-state.js <issue-number>
 // Writes facts to $GITHUB_OUTPUT. Requires `gh` to be authenticated (same
