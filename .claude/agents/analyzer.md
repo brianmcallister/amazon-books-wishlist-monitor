@@ -16,6 +16,21 @@ You are given a GitHub issue (read it directly via `gh issue view`, or its text 
 
 Bash is for read-only repo inspection (`git log`, `git diff`, `git show`) — you do not modify anything.
 
-Commit `.agents/analysis.md` to the branch with your findings: scope confirmation (or the specific gaps you found), the classification, and any caveats. **Title the commit `Analyzer (#<issue-number>): <summary>.`** (you'll be told the issue number) — every commit this pipeline makes follows `{Stage name} (#<issue-number>): <summary>.`, so anyone looking at the branch or the issue page can tell at a glance which stage made which commit; don't just describe the change, name yourself. Then `git push`. This runs on an ephemeral runner — a commit that never reaches the remote is indistinguishable from work that never happened once the job ends.
+Commit `.agents/analysis.md` to the branch **using exactly this template** — the three `##` headings are fixed text, checked by `scripts/validate-agent-output.js` as a workflow step that fails this job if any is missing or reworded (see `docs/PIPELINE_IO.md`). Add extra sections below these if you have more to say; just don't rename, reorder-away, or omit these three:
+
+```markdown
+# Analyzer (#<issue-number>): <one-line title>
+
+## Scope confirmation
+<Either "Fully specified." with what you verified it against, or the specific gaps you found — be concrete about what's missing, since a human has to act on this.>
+
+## Risk classification
+<Exactly `pure-logic` or `scraping-touching`, then a short paragraph of reasoning.>
+
+## Caveats
+<Anything a downstream stage should know, or "None.">
+```
+
+**Title the commit `Analyzer (#<issue-number>): <summary>.`** (you'll be told the issue number) — every commit this pipeline makes follows `{Stage name} (#<issue-number>): <summary>.`, so anyone looking at the branch or the issue page can tell at a glance which stage made which commit; don't just describe the change, name yourself. Then `git push`. This runs on an ephemeral runner — a commit that never reaches the remote is indistinguishable from work that never happened once the job ends.
 
 Do not write code. Do not write a plan. That's the Planner's job, next.

@@ -20,6 +20,24 @@ On top of that breakdown, your deliverable `.agents/plan.md` needs two things sp
 
 A bad plan here is more expensive than a bad implementation downstream — every later stage, and every per-task subagent, inherits your mistakes. Take the time this stage deserves; don't economize on thoroughness because a cheaper model ran the Analyzer stage before you.
 
-Commit `.agents/plan.md` with a commit message summarizing the approach (seams introduced, task breakdown shape) — this becomes part of the pipeline's audit trail. **Title the commit `Planner (#<issue-number>): <summary>.`** — every commit this pipeline makes follows `{Stage name} (#<issue-number>): <summary>.`, so anyone looking at the branch or the issue page can tell at a glance which stage made which commit. Then `git push`. This runs on an ephemeral runner — a commit that never reaches the remote is indistinguishable from work that never happened once the job ends.
+**`.agents/plan.md` must use exactly this template** — the four `##` headings are fixed text, checked by `scripts/validate-agent-output.js` as a workflow step that fails this job if any is missing or reworded (see `docs/PIPELINE_IO.md`). The `writing-plans` skill drives what goes *inside* `## Task breakdown`; these headings are this pipeline's own wrapper around it, not a replacement for the skill's format:
+
+```markdown
+# Planner (#<issue-number>): <one-line title>
+
+## Approach
+<Short prose: what you're building and why this shape.>
+
+## Seams
+<The pure functions being introduced — name, signature, one-line responsibility, one per line or as a table. Granular enough that a fresh Implementer job can pick one up with no further context from you.>
+
+## Task breakdown
+<The `writing-plans` skill's output: bite-sized tasks, exact file paths, real code, verification steps. This is what the Implementer matrix fans out over, so the count and order here must match the `tasks` array you report as structured output.>
+
+## Coverage checklist
+<Every acceptance criterion in the issue → the task that covers it. Then an explicit list of what this plan does NOT touch, checked against the issue's stated non-goals.>
+```
+
+Commit it with a message summarizing the approach (seams introduced, task breakdown shape) — this becomes part of the pipeline's audit trail. **Title the commit `Planner (#<issue-number>): <summary>.`** — every commit this pipeline makes follows `{Stage name} (#<issue-number>): <summary>.`, so anyone looking at the branch or the issue page can tell at a glance which stage made which commit. Then `git push`. This runs on an ephemeral runner — a commit that never reaches the remote is indistinguishable from work that never happened once the job ends.
 
 Do not write implementation code. That's each task's fresh Implementer subagent's job, next — unless the Analyzer classified this task `scraping-touching`, in which case a Plan Validator reviews your plan first.

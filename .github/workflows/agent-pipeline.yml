@@ -155,6 +155,16 @@ jobs:
         run: |
           gh issue comment "${{ inputs.issue_number }}" --body "🤖 **Analyzer stopped** — issue #${{ inputs.issue_number }} isn't fully specified yet. See the analysis commit on branch \`${{ steps.resolve.outputs.branch }}\` for specifics. Reply with clarification and re-run this workflow with the same issue number to continue."
 
+      # Runs last in the job, deliberately: a template violation should fail
+      # this job, but not before the cost record and the not-fully-specified
+      # comment have already landed. See docs/PIPELINE_IO.md.
+      - name: Validate analysis.md against its template
+        run: |
+          node scripts/validate-agent-output.js .agents/analysis.md \
+            "## Scope confirmation" \
+            "## Risk classification" \
+            "## Caveats"
+
   planner:
     needs: analyzer
     if: needs.analyzer.outputs.fully_specified == 'true'
@@ -231,6 +241,16 @@ jobs:
             echo "num_turns=0" >> "$GITHUB_OUTPUT"
           fi
 
+      # Runs after cost extraction so a template violation still leaves a cost
+      # record behind. See docs/PIPELINE_IO.md.
+      - name: Validate plan.md against its template
+        run: |
+          node scripts/validate-agent-output.js .agents/plan.md \
+            "## Approach" \
+            "## Seams" \
+            "## Task breakdown" \
+            "## Coverage checklist"
+
   plan-validator:
     needs: [analyzer, planner]
     if: needs.analyzer.outputs.classification == 'scraping-touching'
@@ -299,6 +319,15 @@ jobs:
         run: |
           gh issue comment "${{ inputs.issue_number }}" --body "🤖 **Plan Validator rejected the plan** for issue #${{ inputs.issue_number }} — see the plan-validation commit on branch \`${{ needs.analyzer.outputs.branch }}\` for specifics. This does not auto-loop back to the Planner; a human decides how to proceed (re-run with guidance, fix the plan by hand, or restart)."
 
+      # Runs last so a template violation still leaves the cost record and the
+      # rejection comment behind. See docs/PIPELINE_IO.md.
+      - name: Validate plan-validation.md against its template
+        run: |
+          node scripts/validate-agent-output.js .agents/plan-validation.md \
+            "## Verdict" \
+            "## Checks" \
+            "## Findings"
+
   implementer:
     needs: [analyzer, planner, plan-validator]
     if: |
@@ -321,6 +350,13 @@ jobs:
         with:
           ref: ${{ needs.analyzer.outputs.branch }}
           fetch-depth: 0
+
+      # Captured BEFORE the session runs so the change stats logged afterward
+      # measure exactly this task's work -- not earlier tasks' commits, and
+      # not the cost-log commit this job makes itself. See docs/PIPELINE_IO.md.
+      - name: Record pre-session HEAD
+        id: before
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - id: run-claude
         uses: anthropics/claude-code-action@v1
@@ -351,16 +387,28 @@ jobs:
             separate job's responsibility.
 
             Commit and push per implementer.md's own instructions.
+
+            Report structured output: `summary` -- one line describing what
+            this task actually did. Do not report file counts or line
+            counts; those are computed from git afterward.
           claude_args: |
             --model claude-sonnet-5
             --permission-mode bypassPermissions
             --max-turns 80
             --disallowedTools "ScheduleWakeup,mcp__*"
+            --json-schema '{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}'
 
-      - name: Log stage cost
+      - name: Log stage cost and change stats
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/log-stage-cost.js "${{ inputs.issue_number }}" "Implementer (${{ matrix.task.index }}/${{ matrix.task.total }})" "$RUNNER_TEMP/claude-execution-output.json"
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
+          DIFF_BASE_SHA: ${{ steps.before.outputs.sha }}
+        run: |
+          STAGE_SUMMARY="$(echo "$STRUCTURED_OUTPUT" | jq -r '.summary // empty')" \
+            node scripts/log-stage-cost.js \
+              "${{ inputs.issue_number }}" \
+              "Implementer (${{ matrix.task.index }}/${{ matrix.task.total }})" \
+              "$RUNNER_TEMP/claude-execution-output.json"
 
   tester:
     needs: [analyzer, planner, implementer]
@@ -450,22 +498,34 @@ jobs:
           plugins: ${{ env.SUPERPOWERS_PLUGIN }}
           show_full_output: 'true'
           prompt: |
-            You are running as a standalone job, picking up right after
-            the Tester job determined no live Amazon check is warranted.
-            Follow `.claude/agents/deployer.md` exactly.
+            You are running as this job's own top-level Claude Code session,
+            picking up right after the Tester job determined no live Amazon
+            check is warranted. Follow `.claude/agents/deployer.md` exactly.
 
             ISSUE NUMBER: ${{ inputs.issue_number }}
             REPO: ${{ github.repository }}
             BRANCH: ${{ needs.analyzer.outputs.branch }} (already checked out)
 
-            Commit and push per its own instructions. Report the PR number
-            you opened or updated (or say plainly if you chose keep/discard
-            instead) as your final output.
+            Commit and push per its own instructions.
+
+            Report structured output: `outcome` (exactly one of "opened",
+            "updated", "kept", "discarded"), `pr_number` (the PR you opened
+            or updated -- omit the field entirely on the keep/discard paths,
+            where there is no PR), and `summary` (one line).
           claude_args: |
             --model claude-sonnet-5
             --permission-mode bypassPermissions
             --max-turns 60
             --disallowedTools "ScheduleWakeup,mcp__*"
+            --json-schema '{"type":"object","properties":{"outcome":{"type":"string","enum":["opened","updated","kept","discarded"]},"pr_number":{"type":"integer"},"summary":{"type":"string"}},"required":["outcome","summary"]}'
+
+      - name: Extract structured output
+        id: extract
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
+        run: |
+          echo "outcome=$(echo "$STRUCTURED_OUTPUT" | jq -r '.outcome // empty')" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$(echo "$STRUCTURED_OUTPUT" | jq -r '.pr_number // empty')" >> "$GITHUB_OUTPUT"
 
       - name: Extract cost
         id: cost
@@ -490,11 +550,30 @@ jobs:
         run: |
           PR_NUMBER=$(gh pr list --head "${{ needs.analyzer.outputs.branch }}" --json number --jq '.[0].number')
           if [ -n "$PR_NUMBER" ]; then
+            # Validate before composing: compose-run-cost.js inserts the run-cost
+            # section after `## Trace`, and used to fall back SILENTLY to
+            # appending at the end when that heading was missing. See
+            # docs/PIPELINE_IO.md.
+            gh pr view "$PR_NUMBER" --json body --jq '.body' > "$RUNNER_TEMP/pr-body.md"
+            node scripts/validate-agent-output.js "$RUNNER_TEMP/pr-body.md" "## Why" "## Trace"
             node scripts/pr-risk-check.js "${{ inputs.issue_number }}" "$PR_NUMBER"
             node scripts/compose-run-cost.js "${{ inputs.issue_number }}" "$PR_NUMBER"
           else
             echo "No open PR found for branch ${{ needs.analyzer.outputs.branch }} -- Deployer likely chose keep/discard. Skipping PR Risk Analyzer and cost report."
           fi
+
+      - name: Log stage outcome
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
+          STAGE_OUTCOME: ${{ steps.extract.outputs.outcome }}
+          STAGE_PR_NUMBER: ${{ steps.extract.outputs.pr_number }}
+        run: |
+          STAGE_SUMMARY="$(echo "$STRUCTURED_OUTPUT" | jq -r '.summary // empty')" \
+            node scripts/log-stage-cost.js \
+              "${{ inputs.issue_number }}" \
+              "Deployer" \
+              "$RUNNER_TEMP/claude-execution-output.json"
 
   live-amazon-check:
     needs: [analyzer, tester]
@@ -613,14 +692,26 @@ jobs:
             REPO: ${{ github.repository }}
             BRANCH: ${{ needs.analyzer.outputs.branch }} (already checked out)
 
-            Commit and push per its own instructions. Report the PR number
-            you opened or updated (or say plainly if you chose keep/discard
-            instead) as your final output.
+            Commit and push per its own instructions.
+
+            Report structured output: `outcome` (exactly one of "opened",
+            "updated", "kept", "discarded"), `pr_number` (the PR you opened
+            or updated -- omit the field entirely on the keep/discard paths,
+            where there is no PR), and `summary` (one line).
           claude_args: |
             --model claude-sonnet-5
             --permission-mode bypassPermissions
             --max-turns 60
             --disallowedTools "ScheduleWakeup,mcp__*"
+            --json-schema '{"type":"object","properties":{"outcome":{"type":"string","enum":["opened","updated","kept","discarded"]},"pr_number":{"type":"integer"},"summary":{"type":"string"}},"required":["outcome","summary"]}'
+
+      - name: Extract structured output
+        id: extract
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
+        run: |
+          echo "outcome=$(echo "$STRUCTURED_OUTPUT" | jq -r '.outcome // empty')" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$(echo "$STRUCTURED_OUTPUT" | jq -r '.pr_number // empty')" >> "$GITHUB_OUTPUT"
 
       - name: Extract cost
         id: cost
@@ -645,8 +736,25 @@ jobs:
         run: |
           PR_NUMBER=$(gh pr list --head "${{ needs.analyzer.outputs.branch }}" --json number --jq '.[0].number')
           if [ -n "$PR_NUMBER" ]; then
+            # Validate before composing -- see the identical step in the
+            # `deployer` job above and docs/PIPELINE_IO.md.
+            gh pr view "$PR_NUMBER" --json body --jq '.body' > "$RUNNER_TEMP/pr-body.md"
+            node scripts/validate-agent-output.js "$RUNNER_TEMP/pr-body.md" "## Why" "## Trace"
             node scripts/pr-risk-check.js "${{ inputs.issue_number }}" "$PR_NUMBER"
             node scripts/compose-run-cost.js "${{ inputs.issue_number }}" "$PR_NUMBER"
           else
             echo "No open PR found for branch ${{ needs.analyzer.outputs.branch }} -- Deployer likely chose keep/discard. Skipping PR Risk Analyzer and cost report."
           fi
+
+      - name: Log stage outcome
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STRUCTURED_OUTPUT: ${{ steps.run-claude.outputs.structured_output }}
+          STAGE_OUTCOME: ${{ steps.extract.outputs.outcome }}
+          STAGE_PR_NUMBER: ${{ steps.extract.outputs.pr_number }}
+        run: |
+          STAGE_SUMMARY="$(echo "$STRUCTURED_OUTPUT" | jq -r '.summary // empty')" \
+            node scripts/log-stage-cost.js \
+              "${{ inputs.issue_number }}" \
+              "Deployer (after live check)" \
+              "$RUNNER_TEMP/claude-execution-output.json"
