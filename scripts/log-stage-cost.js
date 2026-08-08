@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Records one stage's real cost to a durable, git-committed log. Only
-// needed for the Implementer matrix job (see agent-pipeline-v2.yml):
+// needed for the Implementer matrix job (see agent-pipeline.yml):
 // every other stage runs as a single job, so its cost is available
 // directly as a job output (steps.extract-cost.outputs.cost_usd) with no
 // need to round-trip through git. A matrix job's per-instance outputs
@@ -47,10 +47,12 @@ function reauthOrigin() {
   sh('git', ['remote', 'set-url', 'origin', `https://x-access-token:${token}@${serverUrl}/${repo}.git`]);
 }
 
-// See scripts/append-run-cost.js's extractResult() for why: the execution-
-// output file is sometimes the single final "result" object, sometimes a
-// full array of stream events (observed with show_full_output: true, set
-// throughout this repo's workflows) with "result" as one entry.
+// claude-code-action's execution-output file is sometimes the single final
+// "result" object, sometimes a full array of stream events (observed with
+// show_full_output: true, set throughout this repo's workflows) with
+// "result" as one entry -- handle both rather than assuming one, an
+// assumption that silently broke every jq-based cost extraction in this
+// workflow until issue #17's dogfooding run surfaced it.
 function extractResult(parsed) {
   if (!Array.isArray(parsed)) return parsed;
   return parsed.find((e) => e && e.type === 'result') || parsed[parsed.length - 1];
@@ -64,7 +66,7 @@ function main() {
   }
 
   if (!fs.existsSync(execPath)) {
-    console.error(`No execution output file at ${execPath} -- nothing to log. Known fragility, see scripts/append-run-cost.js.`);
+    console.error(`No execution output file at ${execPath} -- nothing to log. Known fragility -- see docs/AGENT_HARNESS.md's Observability section.`);
     process.exit(0); // don't fail the job over missing cost telemetry
   }
 

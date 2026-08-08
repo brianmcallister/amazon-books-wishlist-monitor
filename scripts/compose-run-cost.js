@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 // Appends a "Run Cost" section to a PR's description, run from the
-// Deployer job in agent-pipeline-v2.yml's split architecture -- see
-// docs/AGENT_HARNESS.md's "Splitting stages into separate invocations"
-// section for why this looks different from the single-session
-// pipeline's version of this script.
+// Deployer job in agent-pipeline.yml's split architecture -- see
+// docs/AGENT_HARNESS.md's "How this actually runs" section for the
+// full design.
 //
-// In the split architecture, each stage is its own job/runner, so each
+// Each stage is its own job/runner, so each
 // one's real total_cost_usd is directly knowable (no more "a stage can't
 // know its own cost mid-session" problem -- a job's own cost IS knowable
 // once ITS ONE claude-code-action step ends, which is the whole job).
