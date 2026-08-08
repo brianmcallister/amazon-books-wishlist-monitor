@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// Records one stage's real cost to a durable, git-committed log. Only
-// needed for the Implementer matrix job (see agent-pipeline.yml):
-// every other stage runs as a single job, so its cost is available
-// directly as a job output (steps.extract-cost.outputs.cost_usd) with no
-// need to round-trip through git. A matrix job's per-instance outputs
-// aren't cleanly aggregable across instances in GitHub Actions (only the
-// last instance's outputs survive to needs.<job>.outputs), so each
-// Implementer task instance commits its own line here instead -- the
-// same "commit a small file back to the repo" idiom this project already
-// uses for notified.json and .github/pr-risk-log.jsonl.
+// Records one stage's real cost and its structured output to a durable,
+// git-committed log (`.github/pipeline-run-log.jsonl`) -- see
+// docs/PIPELINE_IO.md for the per-stage contract this implements.
+//
+// Used by the Implementer matrix job and by both Deployer jobs. Implementer
+// *needs* this rather than a plain GitHub Actions job output, because a
+// matrix job's per-instance outputs aren't cleanly aggregable across
+// instances (only the last instance's outputs survive to
+// needs.<job>.outputs). Deployer could use a normal job output, but logs
+// here anyway so there's one unified audit trail rather than two mechanisms
+// depending on job type -- the same "commit a small file back to the repo"
+// idiom this project already uses for notified.json and
+// .github/pr-risk-log.jsonl.
 //
 // Deliberately NOT under .agents/ -- Deployer's pre-squash cleanup
 // (git rm -r .agents/) must not delete this before the final cost
@@ -16,14 +19,36 @@
 //
 // Usage: node scripts/log-stage-cost.js <issue-number> <stage-label> <execution-json-path>
 // e.g.:  node scripts/log-stage-cost.js 17 "Implementer (2/3)" "$RUNNER_TEMP/claude-execution-output.json"
+//
+// Optional environment variables, all independent -- each adds fields to the
+// logged line when set, and is simply omitted when not:
+//   STAGE_SUMMARY     one-line summary from the stage's own structured output
+//   DIFF_BASE_SHA     HEAD sha captured *before* the Claude session ran; when
+//                     set, this script computes files_changed/insertions/
+//                     deletions/commits itself rather than trusting a model
+//                     to self-report numbers `git diff` already knows exactly
+//                     (same reasoning as scripts/pr-risk-check.js -- see
+//                     docs/AGENT_HARNESS.md's "Why this is a script")
+//   STAGE_OUTCOME     Deployer only: opened | updated | kept | discarded
+//   STAGE_PR_NUMBER   Deployer only: the PR it opened/updated, if any
 
 'use strict';
 
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 
+const LOG_PATH = '.github/pipeline-run-log.jsonl';
+
 function sh(cmd, args) {
   return execFileSync(cmd, args, { encoding: 'utf8' }).trim();
+}
+
+function shOrEmpty(cmd, args) {
+  try {
+    return sh(cmd, args);
+  } catch (err) {
+    return '';
+  }
 }
 
 // claude-code-action mints its own scoped GitHub App installation token for
@@ -58,6 +83,26 @@ function extractResult(parsed) {
   return parsed.find((e) => e && e.type === 'result') || parsed[parsed.length - 1];
 }
 
+// MUST be called before this script makes its own commit below -- otherwise
+// the log commit counts itself in the numbers it's reporting.
+function computeChangeStats(baseSha) {
+  const shortstat = shOrEmpty('git', ['diff', '--shortstat', baseSha, 'HEAD']);
+  const filesMatch = shortstat.match(/(\d+) files? changed/);
+  const insMatch = shortstat.match(/(\d+) insertions?\(\+\)/);
+  const delMatch = shortstat.match(/(\d+) deletions?\(-\)/);
+  const commits = shOrEmpty('git', ['rev-list', '--count', `${baseSha}..HEAD`]);
+
+  // All-zero is a real, meaningful result (a task that turned out to be
+  // already done -- which this pipeline hits routinely on re-runs, see
+  // docs/AGENT_HARNESS.md), not a failure to measure. Log it as zeros.
+  return {
+    files_changed: filesMatch ? parseInt(filesMatch[1], 10) : 0,
+    insertions: insMatch ? parseInt(insMatch[1], 10) : 0,
+    deletions: delMatch ? parseInt(delMatch[1], 10) : 0,
+    commits: commits ? parseInt(commits, 10) : 0,
+  };
+}
+
 function main() {
   const [issueNumber, stageLabel, execPath] = process.argv.slice(2);
   if (!issueNumber || !stageLabel || !execPath) {
@@ -70,30 +115,39 @@ function main() {
     process.exit(0); // don't fail the job over missing cost telemetry
   }
 
-  const data = extractResult(JSON.parse(fs.readFileSync(execPath, 'utf8')));
-  const logLine = JSON.stringify({
+  const data = extractResult(JSON.parse(fs.readFileSync(execPath, 'utf8'))) || {};
+
+  // Guard rather than assume: this file's shape has already surprised this
+  // repo twice (missing path, array-vs-object). Cost telemetry is not worth
+  // failing a job whose real work succeeded.
+  const costUsd = typeof data.total_cost_usd === 'number' ? data.total_cost_usd : 0;
+  const numTurns = typeof data.num_turns === 'number' ? data.num_turns : 0;
+
+  const entry = {
     issue: parseInt(issueNumber, 10),
     stage: stageLabel,
-    cost_usd: data.total_cost_usd,
-    num_turns: data.num_turns,
+    cost_usd: costUsd,
+    num_turns: numTurns,
     duration_ms: data.duration_ms,
     timestamp: new Date().toISOString(),
-  });
+  };
 
-  fs.appendFileSync('.github/pipeline-run-log.jsonl', logLine + '\n');
+  if (process.env.STAGE_SUMMARY) entry.summary = process.env.STAGE_SUMMARY;
+  if (process.env.STAGE_OUTCOME) entry.outcome = process.env.STAGE_OUTCOME;
+  if (process.env.STAGE_PR_NUMBER) entry.pr_number = parseInt(process.env.STAGE_PR_NUMBER, 10);
+  if (process.env.DIFF_BASE_SHA) Object.assign(entry, computeChangeStats(process.env.DIFF_BASE_SHA));
+
+  fs.appendFileSync(LOG_PATH, JSON.stringify(entry) + '\n');
 
   sh('git', ['config', 'user.name', 'github-actions[bot]']);
   sh('git', ['config', 'user.email', 'github-actions[bot]@users.noreply.github.com']);
   reauthOrigin();
-  sh('git', ['add', '.github/pipeline-run-log.jsonl']);
-  sh('git', [
-    'commit',
-    '-m',
-    `${stageLabel} (#${issueNumber}): Log run cost ($${data.total_cost_usd.toFixed(4)}, ${data.num_turns} turns).`,
-  ]);
+  sh('git', ['add', LOG_PATH]);
+  sh('git', ['commit', '-m', `${stageLabel} (#${issueNumber}): Log run cost ($${costUsd.toFixed(4)}, ${numTurns} turns).`]);
   sh('git', ['push']);
 
-  console.log(`Logged ${stageLabel}: $${data.total_cost_usd.toFixed(4)}, ${data.num_turns} turns.`);
+  console.log(`Logged ${stageLabel}: $${costUsd.toFixed(4)}, ${numTurns} turns.`);
+  console.log(JSON.stringify(entry, null, 2));
 }
 
 main();
