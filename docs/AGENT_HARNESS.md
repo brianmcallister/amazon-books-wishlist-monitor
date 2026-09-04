@@ -122,6 +122,8 @@ A real dogfooded run (under the earlier single-session design, against issue #1)
 | Deployer | `.claude/agents/deployer.md` | Sonnet 5 | No — opens/updates the PR, does not merge |
 | PR Risk Analyzer | `scripts/pr-risk-check.js` — not a subagent, no model call at all | N/A | No |
 
+**For each stage's exact inputs, structured-output schema, and committed-artifact template, see [`docs/PIPELINE_IO.md`](PIPELINE_IO.md).** Those templates are enforced — `scripts/validate-agent-output.js` runs as a workflow step and fails the job when a required heading is missing, rather than letting a malformed artifact through to a downstream stage that silently copes with it.
+
 Haiku is deliberately used only for the one stage that's genuinely *mechanical* rather than open-ended judgment: confirming a well-specified issue is complete. PR Risk Analyzer used to be Haiku's other mechanical-rubric stage, but "mechanical" turned out to mean "actually deterministic" once looked at closely — see its own section below for why that became a plain script instead of a model call at any tier. Planner, Implementer, and Tester never downgrade below Sonnet 5: a cheap model on the Planner in particular tends to cost more overall, since a bad plan poisons every stage that reads it.
 
 **Model choice is set per job in `agent-pipeline.yml`'s `claude_args`, not in the subagent file's own frontmatter default** — each stage's job hardcodes the model it needs (`--model claude-haiku-4-5` for Analyzer, `--model claude-sonnet-5` for everything else), which is the split-architecture equivalent of the single-session design's old "override at the dispatch call site" mechanism.
